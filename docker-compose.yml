@@ -1,0 +1,15 @@
+services:
+  inatrace-mcp:
+    build: .
+    container_name: inatrace-mcp-server
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8085:8000"
+    networks:
+      - inatrace-test-network
+
+networks:
+  inatrace-test-network:
+    name: inatrace-test-network
+    external: true
