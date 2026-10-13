@@ -122,9 +122,17 @@ def process_dag_results(
             "dpa_code": p.get("dpa_code", "120550"),
             "geometry": geom_eval,
             "deforestation_analysis": {
+                "source_table": "plotdeforestationanalysis",
                 "status": deforest.get("status", "VERIFIED"),
+                "whisp_token": deforest.get("whisptoken"),
+                "submission_mode": deforest.get("submissionmode"),
                 "risk_pcrop": deforest.get("riskpcrop", "low"),
+                "indicator_tree_cover": deforest.get("indicatortreecover"),
+                "indicator_commodities": deforest.get("indicatorcommodities"),
+                "indicator_before_2020": deforest.get("indicatordisturbancebefore2020"),
                 "indicator_after_2020": post_2020_disturbance,
+                "whisp_area_ha": deforest.get("area"),
+                "completed_at": str(deforest["completedat"]) if deforest.get("completedat") else None,
                 "is_eudr_compliant": is_compliant_cutoff and geom_eval.get("is_valid", False)
             }
         })
@@ -164,6 +172,7 @@ def process_dag_results(
         "eudr_summary": {
             "overall_status": "COMPLIANT" if all_plots_compliant else "NON_COMPLIANT",
             "cutoff_date": "2020-12-31",
+            "whisp_source": "LOCAL_DB_PLOTDEFORESTATIONANALYSIS",
             "total_plots_audited": len(participating_plots)
         }
     }
@@ -172,7 +181,8 @@ def process_dag_results(
 async def build_lot_dag(conn: Any, lot_identifier: str, company_id: int) -> Dict[str, Any]:
     """
     Executes the recursive DAG lineage query on PostgreSQL and resolves
-    associated plots, coordinates, and deforestation analyses.
+    associated plots, coordinates, and deforestation analyses from the local
+    plotdeforestationanalysis table.
     """
     rows = await conn.fetch(DAG_RECURSIVE_QUERY, lot_identifier, company_id)
     if not rows:
@@ -184,10 +194,9 @@ async def build_lot_dag(conn: Any, lot_identifier: str, company_id: int) -> Dict
         }
 
     lineage_rows = [dict(r) for r in rows]
-    leaf_stock_order_ids = [r["stock_order_id"] for r in lineage_rows]
     farmer_ids = [r["producerusercustomer_id"] for r in lineage_rows if r.get("producerusercustomer_id")]
 
-    # Fetch plots linked via farmer or parcelLot with tenant isolation
+    # Fetch plots linked via farmer with tenant isolation on usercustomer.company_id
     plots_query = """
         SELECT DISTINCT 
             pl.id, 
@@ -202,7 +211,7 @@ async def build_lot_dag(conn: Any, lot_identifier: str, company_id: int) -> Dict
         FROM plot pl
         JOIN usercustomer uc ON (pl.farmer_id = uc.id)
         WHERE uc.id = ANY($1::bigint[])
-          AND (uc.company_id = $2 OR pl.company_id = $2)
+          AND uc.company_id = $2
     """
     plots_rows = await conn.fetch(plots_query, farmer_ids, company_id) if farmer_ids else []
     plots_data = [dict(p) for p in plots_rows]
@@ -219,12 +228,16 @@ async def build_lot_dag(conn: Any, lot_identifier: str, company_id: int) -> Dict
         """, plot_ids)
     coords_data = [dict(c) for c in coords_rows]
 
-    # Fetch latest deforestation analysis
+    # Fetch latest Whisp deforestation analysis from local plotdeforestationanalysis table
     deforest_rows = []
     if plot_ids:
         deforest_rows = await conn.fetch("""
             SELECT DISTINCT ON (plot_id)
-                plot_id, status, riskpcrop, indicatordisturbanceafter2020
+                plot_id, status, whisptoken, submissionmode, geoid,
+                requestedat, completedat, riskpcrop,
+                indicatortreecover, indicatorcommodities,
+                indicatordisturbancebefore2020, indicatordisturbanceafter2020,
+                area, areaunit, country, errormessage
             FROM plotdeforestationanalysis
             WHERE plot_id = ANY($1::bigint[])
             ORDER BY plot_id, id DESC
