@@ -38,40 +38,181 @@ logging.basicConfig(
 )
 logger = logging.getLogger("inatrace-mcp")
 
-# FastMCP Initialization with SDK fallback for environments without MCP installed
+# Unified FastMCP Server with built-in HTTP/SSE & Health endpoints (0.0.0.0:PORT)
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP as _SDKFastMCP
     IS_FASTMCP_INSTALLED = True
 except ImportError:
+    _SDKFastMCP = None
     IS_FASTMCP_INSTALLED = False
 
-    class FastMCP:  # type: ignore
-        """Fallback FastMCP implementation for standalone or offline execution."""
-        def __init__(self, name: str):
-            self.name = name
-            self.tools: Dict[str, Any] = {}
-            self._startup_handler = None
-            self._shutdown_handler = None
 
-        def tool(self):
-            def decorator(fn):
-                self.tools[fn.__name__] = fn
-                return fn
-            return decorator
+class INATraceFastMCP:
+    """
+    Production-grade FastMCP orchestrator supporting both MCP SDK registration
+    and standalone async HTTP/SSE + Healthcheck endpoints on PORT (default 8000).
+    """
+    def __init__(self, name: str):
+        self.name = name
+        self.tools: Dict[str, Any] = {}
+        self._startup_handler = None
+        self._shutdown_handler = None
+        self._sdk = _SDKFastMCP(name) if _SDKFastMCP is not None else None
 
-        def on_startup(self, fn):
-            self._startup_handler = fn
+    def tool(self):
+        def decorator(fn):
+            self.tools[fn.__name__] = fn
+            if self._sdk is not None:
+                try:
+                    self._sdk.tool()(fn)
+                except Exception:
+                    pass
             return fn
+        return decorator
 
-        def on_shutdown(self, fn):
-            self._shutdown_handler = fn
-            return fn
+    def on_startup(self, fn):
+        self._startup_handler = fn
+        return fn
 
-        def run(self):
-            logger.info(f"Running standalone FastMCP server '{self.name}' with {len(self.tools)} tools.")
+    def on_shutdown(self, fn):
+        self._shutdown_handler = fn
+        return fn
+
+    async def _handle_http_client(self, reader, writer):
+        import json as _json
+        from urllib.parse import urlparse, parse_qs
+        from src.infrastructure.db_pool import get_db_pool
+
+        try:
+            request_line = await reader.readline()
+            if not request_line:
+                writer.close()
+                return
+            parts = request_line.decode("utf-8", errors="ignore").strip().split(" ")
+            method = parts[0] if len(parts) > 0 else "GET"
+            raw_path = parts[1] if len(parts) > 1 else "/"
+            parsed_url = urlparse(raw_path)
+            path = parsed_url.path
+
+            headers: Dict[str, str] = {}
+            while True:
+                line = await reader.readline()
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+                hline = line.decode("utf-8", errors="ignore").strip()
+                if ":" in hline:
+                    k, v = hline.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+
+            content_length = int(headers.get("content-length", "0"))
+            body_bytes = await reader.readexactly(content_length) if content_length > 0 else b""
+
+            def _send_json(status_code: int, status_text: str, payload: Dict[str, Any]):
+                body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                resp = (
+                    f"HTTP/1.1 {status_code} {status_text}\r\n"
+                    f"Content-Type: application/json; charset=utf-8\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    f"Link: </mcp/sse>; rel=\"modelcontextprotocol\"\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode("utf-8") + body
+                writer.write(resp)
+
+            if method == "GET" and path in ("/health/live", "/health"):
+                _send_json(200, "OK", {
+                    "status": "ALIVE",
+                    "server": self.name,
+                    "tools_count": len(self.tools),
+                    "whisp_source": "plotdeforestationanalysis"
+                })
+            elif method == "GET" and path == "/health/ready":
+                pool = get_db_pool()
+                _send_json(200 if pool else 503, "OK" if pool else "Service Unavailable", {
+                    "status": "READY" if pool else "DEGRADED",
+                    "db_pool_connected": pool is not None,
+                    "whisp_table": "plotdeforestationanalysis"
+                })
+            elif method == "GET" and path in ("/mcp/tools", "/tools"):
+                _send_json(200, "OK", {
+                    "server": self.name,
+                    "tools": [
+                        {"name": k, "description": (fn.__doc__ or "").strip()}
+                        for k, fn in self.tools.items()
+                    ]
+                })
+            elif method == "GET" and path == "/mcp/sse":
+                qs = parse_qs(parsed_url.query)
+                lot_id = qs.get("lotId", ["unknown"])[0]
+                event_payload = _json.dumps({
+                    "protocol": "mcp/1.0",
+                    "server": self.name,
+                    "lotId": lot_id,
+                    "availableTools": list(self.tools.keys())
+                })
+                sse_body = f"event: endpoint\ndata: {event_payload}\n\n".encode("utf-8")
+                resp = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: text/event-stream\r\n"
+                    f"Cache-Control: no-cache\r\n"
+                    f"Link: </mcp/sse?lotId={lot_id}>; rel=\"modelcontextprotocol\"\r\n"
+                    f"Content-Length: {len(sse_body)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode("utf-8") + sse_body
+                writer.write(resp)
+            elif method == "POST" and (path.startswith("/mcp/tools/") or path.startswith("/tools/")):
+                tool_name = path.rstrip("/").split("/")[-1]
+                if tool_name not in self.tools:
+                    _send_json(404, "Not Found", {"error": f"Tool '{tool_name}' not found"})
+                else:
+                    auth_header = headers.get("authorization")
+                    try:
+                        if auth_header:
+                            authorize_request(auth_header, tool_name)
+                        params = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+                        result = await self.tools[tool_name](**params)
+                        _send_json(200, "OK", result)
+                    except PermissionError as pe:
+                        _send_json(403, "Forbidden", {"error": "FORBIDDEN", "message": str(pe)})
+                    except Exception as ex:
+                        _send_json(400, "Bad Request", {"error": "EXECUTION_ERROR", "message": str(ex)})
+            else:
+                _send_json(404, "Not Found", {"error": "NOT_FOUND", "path": path})
+
+            await writer.drain()
+        except Exception as exc:
+            logger.error(f"HTTP handler error: {exc}")
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def serve_forever(self):
+        import asyncio
+        if self._startup_handler:
+            await self._startup_handler()
+        server = await asyncio.start_server(self._handle_http_client, "0.0.0.0", settings.PORT)
+        logger.info(
+            f"INATrace MCP Server '{self.name}' listening on 0.0.0.0:{settings.PORT} "
+            f"with {len(self.tools)} canonical tools."
+        )
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            if self._shutdown_handler:
+                await self._shutdown_handler()
+
+    def run(self):
+        import asyncio
+        try:
+            asyncio.run(self.serve_forever())
+        except KeyboardInterrupt:
+            logger.info("Server stopped by signal.")
 
 
-mcp = FastMCP(settings.SERVER_NAME)
+mcp = INATraceFastMCP(settings.SERVER_NAME)
 
 
 def authorize_request(bearer_token: Optional[str], tool_name: str) -> AuthContext:

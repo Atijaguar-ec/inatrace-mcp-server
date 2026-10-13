@@ -21,6 +21,7 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY src/ ./src/
+COPY tests/ ./tests/
 
 # Usuario no root para cumplimiento de seguridad ISO/IEC 27001
 RUN useradd -u 1000 -m inatrace && chown -R inatrace:inatrace /app
