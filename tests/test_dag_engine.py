@@ -168,6 +168,96 @@ class TestDagEngine(unittest.TestCase):
         self.assertEqual(res["participating_plots_count"], 0)
         self.assertEqual(res["eudr_summary"]["overall_status"], "NON_COMPLIANT")
 
+    def test_exact_parcellot_filtering_excludes_unrelated_farmer_plots(self):
+        # Farmer 10 owns two plots: "Finca San Antonio" (compliant) and "Finca El Paraíso" (deforested).
+        # The delivery StockOrder specifies parcellot="Finca San Antonio".
+        lineage_rows = [{
+            "stock_order_id": 601,
+            "lot_code": "LOT-FV-001",
+            "amount": 400.0,
+            "producerusercustomer_id": 10,
+            "parcellot": "Finca San Antonio",
+            "level": 1
+        }]
+        plots_data = [
+            {
+                "id": 101,
+                "plotname": "Finca San Antonio",
+                "size": 2.5,
+                "productionestimate": 40.0,
+                "farmer_id": 10,
+                "name": "Pedro",
+                "surname": "Alcívar"
+            },
+            {
+                "id": 102,
+                "plotname": "Finca El Paraíso",
+                "size": 3.0,
+                "productionestimate": 30.0,
+                "farmer_id": 10,
+                "name": "Pedro",
+                "surname": "Alcívar"
+            }
+        ]
+        coords_data = [
+            {"plot_id": 101, "latitude": -1.542189, "longitude": -79.754123},
+            {"plot_id": 102, "latitude": -1.550000, "longitude": -79.760000}
+        ]
+        deforest_data = [
+            {"plot_id": 101, "status": "VERIFIED", "riskpcrop": "low", "indicatordisturbanceafter2020": "0"},
+            {"plot_id": 102, "status": "NON_COMPLIANT", "riskpcrop": "high", "indicatordisturbanceafter2020": "severe"}
+        ]
+
+        res = process_dag_results(
+            lot_identifier="LOT-FV-001",
+            company_id=5,
+            lineage_rows=lineage_rows,
+            plots_data=plots_data,
+            coordinates_data=coords_data,
+            deforestation_data=deforest_data
+        )
+        self.assertEqual(res["participating_plots_count"], 1)
+        self.assertEqual(res["participating_plots"][0]["plot_name"], "Finca San Antonio")
+        self.assertEqual(res["eudr_summary"]["overall_status"], "COMPLIANT")
+
+    def test_whisp_tristate_pending_analysis_and_tokenomics(self):
+        lineage_rows = [{
+            "stock_order_id": 784,
+            "lot_code": "LOT-STAGE-784",
+            "amount": 300.0,
+            "producerusercustomer_id": 10,
+            "level": 1
+        }]
+        plots_data = [{
+            "id": 740,
+            "plotname": "Finca Santa Rosa",
+            "size": 2.2,
+            "productionestimate": 50.0,
+            "farmer_id": 10
+        }]
+        coords_data = [{"plot_id": 740, "latitude": -1.542189, "longitude": -79.754123}]
+
+        # Empty deforestation_data with require_completed_whisp=True and include_raw_coordinates=False
+        res = process_dag_results(
+            lot_identifier="784",
+            company_id=1,
+            lineage_rows=lineage_rows,
+            plots_data=plots_data,
+            coordinates_data=coords_data,
+            deforestation_data=[],
+            include_raw_coordinates=False,
+            require_completed_whisp=True
+        )
+        plot = res["participating_plots"][0]
+        self.assertEqual(plot["deforestation_analysis"]["status"], "PENDING_WHISP_ANALYSIS")
+        self.assertEqual(plot["deforestation_analysis"]["whisp_verification_state"], "PENDING_WHISP_ANALYSIS")
+        self.assertEqual(res["eudr_summary"]["overall_status"], "PENDING_WHISP_ANALYSIS")
+        self.assertEqual(res["eudr_summary"]["strict_whisp_status"], "PENDING_WHISP_ANALYSIS")
+        # Tokenomics check: raw coordinates omitted, centroid and bounding_box present
+        self.assertNotIn("coordinates", plot["geometry"])
+        self.assertIn("centroid", plot["geometry"])
+        self.assertIn("bounding_box", plot["geometry"])
+
 
 if __name__ == "__main__":
     unittest.main()

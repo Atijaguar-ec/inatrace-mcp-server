@@ -195,6 +195,44 @@ class TestMcpTools(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.get("verdict"), "403_FORBIDDEN")
         self.assertIn("enablePublicDeliveryReceipt", res.get("recommendation"))
 
+    async def test_mcp_jsonrpc_resources_and_prompts(self):
+        from src.app import mcp
+
+        # 1. initialize
+        init_res = await mcp.handle_jsonrpc_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        self.assertIn("capabilities", init_res["result"])
+        self.assertIn("resources", init_res["result"]["capabilities"])
+        self.assertIn("prompts", init_res["result"]["capabilities"])
+
+        # 2. resources/list & resources/read
+        r_list = await mcp.handle_jsonrpc_request({"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
+        uris = [r["uri"] for r in r_list["result"]["resources"]]
+        self.assertIn("inatrace://catalogs/dpa-ecuador", uris)
+        self.assertIn("inatrace://regulations/eudr-2023-1115", uris)
+        self.assertIn("inatrace://schemas/sri-modulo11", uris)
+
+        r_read = await mcp.handle_jsonrpc_request({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {"uri": "inatrace://catalogs/dpa-ecuador"}
+        })
+        self.assertIn("120550", r_read["result"]["contents"][0]["text"])
+
+        # 3. prompts/list & prompts/get
+        p_list = await mcp.handle_jsonrpc_request({"jsonrpc": "2.0", "id": 4, "method": "prompts/list"})
+        p_names = [p["name"] for p in p_list["result"]["prompts"]]
+        self.assertIn("auditoria_aduanera_eudr", p_names)
+        self.assertIn("diagnostico_forense_soporte_giz", p_names)
+
+        p_get = await mcp.handle_jsonrpc_request({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "prompts/get",
+            "params": {"name": "auditoria_aduanera_eudr", "arguments": {"lot_identifier": "784", "company_id": 1}}
+        })
+        self.assertIn("messages", p_get["result"])
+
 
 if __name__ == "__main__":
     unittest.main()

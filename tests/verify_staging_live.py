@@ -95,14 +95,23 @@ async def run_live_staging_verification():
     print(f"[2/7] diagnose_tenant_health(company_id={company_id}) -> status={health_res['status']}, "
           f"issues={health_res['issues_count']} ({(time.perf_counter() - t1)*1000:.1f} ms)")
 
-    # 3. Test audit_lot_traceability (Regulatory Full Dossier)
+    # 3. Test audit_lot_traceability (Regulatory Full Dossier + Mass Balance + OWASP LLM01 + Tokenomics)
     t2 = time.perf_counter()
     dag_res = await execute_audit_lot_traceability(
-        AuditLotInput(lot_identifier=str(lot_id), company_id=company_id, include_plots=True, public_view=False)
+        AuditLotInput(
+            lot_identifier=str(lot_id),
+            company_id=company_id,
+            include_plots=True,
+            public_view=False,
+            include_raw_coordinates=False
+        )
     )
-    print(f"[3/7] audit_lot_traceability(lot={lot_id}, public_view=False) -> found={dag_res['found']}, "
+    assert "mass_balance" in dag_res, "Expected mass_balance in DAG response"
+    assert "security_audit" in dag_res and dag_res["security_audit"]["owasp_llm01_checked"] is True
+    print(f"[3/8] audit_lot_traceability(lot={lot_id}, public_view=False) -> found={dag_res['found']}, "
           f"nodes={dag_res.get('total_nodes')}, plots={dag_res.get('participating_plots_count')}, "
-          f"whisp_source={dag_res.get('eudr_summary', {}).get('whisp_source')} "
+          f"mass_balance={dag_res.get('mass_balance', {}).get('status')}, "
+          f"strict_whisp={dag_res.get('eudr_summary', {}).get('strict_whisp_status')} "
           f"({(time.perf_counter() - t2)*1000:.1f} ms)")
 
     # 4. Test audit_lot_traceability (Public B2C Privacy Sanitized)
@@ -111,13 +120,14 @@ async def run_live_staging_verification():
         AuditLotInput(lot_identifier=str(lot_id), company_id=company_id, include_plots=True, public_view=True)
     )
     assert "participating_plots" not in pub_res, "PII leak: participating_plots must not be in public B2C view!"
-    print(f"[4/7] audit_lot_traceability(lot={lot_id}, public_view=True) -> channel={pub_res.get('channel')}, "
+    print(f"[4/8] audit_lot_traceability(lot={lot_id}, public_view=True) -> channel={pub_res.get('channel')}, "
           f"eudr_status={pub_res.get('eudr_status')}, PII stripped=OK ({(time.perf_counter() - t3)*1000:.1f} ms)")
 
     # 5. Test verify_eudr_compliance
     t4 = time.perf_counter()
     eudr_res = await execute_verify_eudr_compliance(VerifyEudrInput(stock_order_id=lot_id))
-    print(f"[5/7] verify_eudr_compliance(stock_order_id={lot_id}) -> status={eudr_res['eudr_status']}, "
+    print(f"[5/8] verify_eudr_compliance(stock_order_id={lot_id}) -> status={eudr_res['eudr_status']}, "
+          f"strict_whisp={eudr_res.get('strict_whisp_status')}, "
           f"plots_evaluated={eudr_res['total_plots_evaluated']}, verdict={eudr_res['customs_verdict']} "
           f"({(time.perf_counter() - t4)*1000:.1f} ms)")
 
@@ -129,7 +139,7 @@ async def run_live_staging_verification():
     agro_res = await execute_export_agrocalidad_guia(
         ExportAgrocalidadInput(company_id=company_id, date_from="2025-01-01", date_to="2026-12-31")
     )
-    print(f"[6/7] generate_traces_jsonld & export_agrocalidad_guia -> places={len(traces_res.get('productionPlaces', []))}, "
+    print(f"[6/8] generate_traces_jsonld & export_agrocalidad_guia -> places={len(traces_res.get('productionPlaces', []))}, "
           f"csv_bom={agro_res['csv_content'].startswith(chr(0xFEFF))} ({(time.perf_counter() - t5)*1000:.1f} ms)")
 
     # 7. Test verify_sri_compliance & diagnose_and_repair_qr
@@ -138,13 +148,23 @@ async def run_live_staging_verification():
     qr_res = await execute_diagnose_and_repair_qr(
         DiagnoseQrInput(qr_payload=f"https://inatrace.test.unocace.com/public/delivery-receipt/{lot_id}", company_id=company_id)
     )
-    print(f"[7/7] verify_sri_compliance & diagnose_and_repair_qr -> sri_status={sri_res['sri_status']}, "
+    print(f"[7/8] verify_sri_compliance & diagnose_and_repair_qr -> sri_status={sri_res['sri_status']}, "
           f"qr_verdict={qr_res['verdict']} ({(time.perf_counter() - t6)*1000:.1f} ms)")
+
+    # 8. Test MCP Protocol JSON-RPC 2.0 (Resources & Prompts)
+    t7 = time.perf_counter()
+    from src.app import mcp
+    res_list = await mcp.handle_jsonrpc_request({"jsonrpc": "2.0", "id": 10, "method": "resources/list"})
+    prm_list = await mcp.handle_jsonrpc_request({"jsonrpc": "2.0", "id": 11, "method": "prompts/list"})
+    assert len(res_list["result"]["resources"]) == 3
+    assert len(prm_list["result"]["prompts"]) == 2
+    print(f"[8/8] MCP JSON-RPC 2.0 Protocol -> resources={len(res_list['result']['resources'])}, "
+          f"prompts={len(prm_list['result']['prompts'])} ({(time.perf_counter() - t7)*1000:.1f} ms)")
 
     await close_db_pool()
     total_ms = (time.perf_counter() - t0) * 1000
     print("=" * 80)
-    print(f"ALL 7 LIVE STAGING TESTS PASSED IN {total_ms:.1f} ms (SLA < 15,000 ms)")
+    print(f"ALL 8 LIVE STAGING TESTS PASSED IN {total_ms:.1f} ms (SLA < 15,000 ms)")
     print("=" * 80)
 
 

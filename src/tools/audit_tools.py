@@ -16,11 +16,27 @@ class AuditLotInput(BaseModel):
     company_id: int = Field(..., description="ID de la organización (ej. 1 UNOCACE, 5 Fortaleza del Valle)")
     include_plots: bool = Field(default=True, description="Indica si se deben resolver las parcelas y productores de origen")
     public_view: bool = Field(default=False, description="Aplica el filtro de minimización LOPDP para visualización pública")
+    include_raw_coordinates: bool = Field(
+        default=False,
+        description="Si es False (default para optimizar ventana de contexto LLM), retorna centroide y bounding_box omitiendo el arreglo crudo de vértices"
+    )
+    require_completed_whisp: bool = Field(
+        default=False,
+        description="Si es True, exige registro satelital completado en plotdeforestationanalysis (tri-state estricto)"
+    )
 
 
 class VerifyEudrInput(BaseModel):
     stock_order_id: int = Field(..., description="ID numérico de base de datos del StockOrder exportable")
     strict_polygon_closure: bool = Field(default=True, description="Fuerza validación estricta de polígono cerrado para fincas > 4 ha")
+    include_raw_coordinates: bool = Field(
+        default=False,
+        description="Si es False (default), resume geometrías en centroide + bounding_box para ahorrar tokens LLM"
+    )
+    require_completed_whisp: bool = Field(
+        default=False,
+        description="Si es True, marca como PENDING_WHISP_ANALYSIS las parcelas sin fila en plotdeforestationanalysis"
+    )
 
 
 async def execute_audit_lot_traceability(params: AuditLotInput) -> Dict[str, Any]:
@@ -73,11 +89,19 @@ async def execute_audit_lot_traceability(params: AuditLotInput) -> Dict[str, Any
             lineage_rows=mock_lineage,
             plots_data=mock_plots,
             coordinates_data=mock_coords,
-            deforestation_data=mock_deforest
+            deforestation_data=mock_deforest,
+            include_raw_coordinates=params.include_raw_coordinates,
+            require_completed_whisp=params.require_completed_whisp
         )
     else:
         async with pool.acquire() as conn:
-            result = await build_lot_dag(conn, params.lot_identifier, params.company_id)
+            result = await build_lot_dag(
+                conn,
+                params.lot_identifier,
+                params.company_id,
+                include_raw_coordinates=params.include_raw_coordinates,
+                require_completed_whisp=params.require_completed_whisp
+            )
 
     if params.public_view:
         return apply_privacy_gate(result, is_public_channel=True)
@@ -92,7 +116,12 @@ async def execute_verify_eudr_compliance(params: VerifyEudrInput) -> Dict[str, A
     if not pool:
         # Fallback simulated response
         coords = [(-79.754123, -1.542189)]
-        geom_eval = evaluate_plot_geometry(coords, 3.5, strict_polygon_closure=params.strict_polygon_closure)
+        geom_eval = evaluate_plot_geometry(
+            coords,
+            3.5,
+            strict_polygon_closure=params.strict_polygon_closure,
+            include_raw_coordinates=params.include_raw_coordinates
+        )
         return {
             "stock_order_id": params.stock_order_id,
             "eudr_status": "COMPLIANT",
@@ -104,6 +133,7 @@ async def execute_verify_eudr_compliance(params: VerifyEudrInput) -> Dict[str, A
                 "plot_id": 1,
                 "size_ha": 3.5,
                 "geometry_type": geom_eval.get("type"),
+                "geometry": geom_eval,
                 "is_valid": geom_eval.get("is_valid"),
                 "deforestation_risk": "NONE"
             }]
@@ -116,14 +146,21 @@ async def execute_verify_eudr_compliance(params: VerifyEudrInput) -> Dict[str, A
         )
         company_id = so_row["company_id"] if so_row else 1
 
-        dag_result = await build_lot_dag(conn, str(params.stock_order_id), company_id)
+        dag_result = await build_lot_dag(
+            conn,
+            str(params.stock_order_id),
+            company_id,
+            include_raw_coordinates=params.include_raw_coordinates,
+            require_completed_whisp=params.require_completed_whisp
+        )
         participating_plots = dag_result.get("participating_plots", [])
 
         plot_results = []
         all_compliant = bool(participating_plots)
 
         for p in participating_plots:
-            is_valid = p.get("deforestation_analysis", {}).get("is_eudr_compliant", False)
+            deforest_info = p.get("deforestation_analysis", {})
+            is_valid = deforest_info.get("is_eudr_compliant", False)
             if not is_valid:
                 all_compliant = False
 
@@ -132,15 +169,22 @@ async def execute_verify_eudr_compliance(params: VerifyEudrInput) -> Dict[str, A
                 "plot_name": p.get("plot_name"),
                 "size_ha": p.get("size_ha"),
                 "geometry": p.get("geometry"),
+                "whisp_verification_state": deforest_info.get("whisp_verification_state"),
                 "deforestation_pass": is_valid,
                 "is_compliant": is_valid
             })
 
+        eudr_status = dag_result.get("eudr_summary", {}).get(
+            "overall_status",
+            "COMPLIANT" if (all_compliant and plot_results) else "NON_COMPLIANT"
+        )
         return {
             "stock_order_id": params.stock_order_id,
-            "eudr_status": "COMPLIANT" if (all_compliant and plot_results) else "NON_COMPLIANT",
+            "eudr_status": eudr_status,
+            "strict_whisp_status": dag_result.get("eudr_summary", {}).get("strict_whisp_status"),
             "deforestation_cutoff_verified": "2020-12-31",
             "total_plots_evaluated": len(plot_results),
+            "mass_balance": dag_result.get("mass_balance"),
             "customs_verdict": "RELEASE_CONTAINER_GREEN_CHANNEL" if all_compliant else "HOLD_CONTAINER_INSPECTION_REQUIRED",
             "plots_detail": plot_results
         }

@@ -115,15 +115,28 @@ def validate_and_close_polygon(coordinates: List[Tuple[float, float]]) -> Tuple[
         return closed_coords, enforced
 
 
+def _compute_bbox_and_centroid(coords: List[Tuple[float, float]]) -> Tuple[List[float], List[float]]:
+    """Computes deterministic WGS84 [min_lon, min_lat, max_lon, max_lat] and [lon, lat] centroid."""
+    if not coords:
+        return [], []
+    lons = [float(p[0]) for p in coords]
+    lats = [float(p[1]) for p in coords]
+    bbox = [round(min(lons), 6), round(min(lats), 6), round(max(lons), 6), round(max(lats), 6)]
+    centroid = [round(sum(lons) / len(lons), 6), round(sum(lats) / len(lats), 6)]
+    return bbox, centroid
+
+
 def evaluate_plot_geometry(
     coordinates: List[Tuple[float, float]],
     plot_size_ha: float,
-    strict_polygon_closure: bool = True
+    strict_polygon_closure: bool = True,
+    include_raw_coordinates: bool = True
 ) -> Dict[str, Any]:
     """
     Evaluates plot coordinates against EUDR Article 9 rules:
     - Plots <= 4.0 ha: Single coordinate (centroid) admitted if precision >= 6 decimals.
     - Plots > 4.0 ha: Enforces closed ring polygon (closedRing).
+    - When include_raw_coordinates=False, omits bulky vertex arrays to protect LLM context budget.
     """
     if not coordinates:
         return {
@@ -131,6 +144,8 @@ def evaluate_plot_geometry(
             "is_valid": False,
             "error": "No se encontraron coordenadas para la parcela",
             "coordinates": [],
+            "centroid": [],
+            "bounding_box": [],
             "calculated_area_ha": 0.0
         }
 
@@ -138,72 +153,97 @@ def evaluate_plot_geometry(
 
     # Case 1: Predio > 4.0 ha excede umbral de centroide y exige polígono cerrado (EUDR Art. 9)
     if plot_size_ha > 4.0 and len(norm_coords) < 3:
+        bbox, centroid = _compute_bbox_and_centroid(norm_coords)
         return {
             "type": "POLYGON",
             "is_valid": False,
             "error": f"Predio de {plot_size_ha} ha excede las 4.0 ha y requiere polígono cerrado obligatorio con mínimo 3 vértices (recibidos: {len(norm_coords)}) (EUDR Art. 9)",
-            "coordinates": norm_coords,
+            "coordinates": norm_coords if include_raw_coordinates else [],
+            "centroid": centroid,
+            "bounding_box": bbox,
             "calculated_area_ha": 0.0
         }
-
 
     # Case 2: Centroid for small plots (<= 4.0 ha)
     if plot_size_ha <= 4.0 and len(norm_coords) == 1:
         lon, lat = norm_coords[0]
-        # In Ecuador: Longitude is roughly -75 to -81, Latitude is roughly +1.5 to -5.0
         raw_lon = coordinates[0][0]
         raw_lat = coordinates[0][1]
         dec_lon = _count_decimal_places(raw_lon)
         dec_lat = _count_decimal_places(raw_lat)
         precision_valid = (dec_lon >= 6 and dec_lat >= 6)
+        pt = (round(lon, 7), round(lat, 7))
 
-        return {
+        res = {
             "type": "CENTROID",
             "is_valid": precision_valid,
-            "coordinates": [(round(lon, 7), round(lat, 7))],
+            "centroid": [round(lon, 6), round(lat, 6)],
+            "bounding_box": [round(lon, 6), round(lat, 6), round(lon, 6), round(lat, 6)],
             "decimal_precision": {"lon": dec_lon, "lat": dec_lat},
             "plot_size_ha": plot_size_ha,
             "calculated_area_ha": plot_size_ha,
             "closed_ring_enforced": False,
             "error": None if precision_valid else "El centroide requiere mínimo 6 decimales de precisión para cumplir EUDR"
         }
+        if include_raw_coordinates:
+            res["coordinates"] = [pt]
+        else:
+            res["coordinates_omitted_for_context_budget"] = True
+        return res
 
     # Case 3: Polygon with insufficient vertices (< 3)
     if len(norm_coords) < 3:
+        bbox, centroid = _compute_bbox_and_centroid(norm_coords)
         return {
             "type": "POLYGON",
             "is_valid": False,
             "error": f"Predio de {plot_size_ha} ha requiere polígono cerrado con mínimo 3 vértices (recibidos: {len(norm_coords)})",
-            "coordinates": norm_coords,
+            "coordinates": norm_coords if include_raw_coordinates else [],
+            "centroid": centroid,
+            "bounding_box": bbox,
             "calculated_area_ha": 0.0
         }
 
     try:
         closed_coords, enforced = validate_and_close_polygon(norm_coords)
     except Exception as exc:
+        bbox, centroid = _compute_bbox_and_centroid(norm_coords)
         return {
             "type": "POLYGON",
             "is_valid": False,
             "error": f"Error topológico en polígono: {str(exc)}",
-            "coordinates": norm_coords,
+            "coordinates": norm_coords if include_raw_coordinates else [],
+            "centroid": centroid,
+            "bounding_box": bbox,
             "calculated_area_ha": 0.0
         }
 
-    # Compute area
+    # Compute area, centroid and bounding box
     if SHAPELY_AVAILABLE:
         poly = ShapelyPolygon(closed_coords)
         calc_area = _shoelace_area_wgs84_ha(closed_coords)
+        minx, miny, maxx, maxy = poly.bounds
+        bbox = [round(minx, 6), round(miny, 6), round(maxx, 6), round(maxy, 6)]
+        centroid = [round(poly.centroid.x, 6), round(poly.centroid.y, 6)]
     else:
         calc_area = _shoelace_area_wgs84_ha(closed_coords)
+        bbox, centroid = _compute_bbox_and_centroid(closed_coords)
 
-    return {
+    res = {
         "type": "POLYGON",
         "is_valid": True,
         "closed_ring_enforced": enforced,
-        "coordinates": closed_coords,
         "vertices_count": len(closed_coords),
+        "centroid": centroid,
+        "bounding_box": bbox,
         "plot_size_ha": plot_size_ha,
         "calculated_area_ha": calc_area,
         "error": None
     }
+    if include_raw_coordinates:
+        res["coordinates"] = closed_coords
+    else:
+        res["coordinates_omitted_for_context_budget"] = True
+    return res
+
 

@@ -49,12 +49,17 @@ except ImportError:
 
 class INATraceFastMCP:
     """
-    Production-grade FastMCP orchestrator supporting both MCP SDK registration
-    and standalone async HTTP/SSE + Healthcheck endpoints on PORT (default 8000).
+    Production-grade FastMCP orchestrator supporting:
+    - MCP Tools (@mcp.tool)
+    - MCP Resources (@mcp.resource)
+    - MCP Prompts (@mcp.prompt)
+    - JSON-RPC 2.0 over HTTP (POST /mcp) + REST (/mcp/tools, /mcp/resources, /mcp/prompts) + SSE (/mcp/sse)
     """
     def __init__(self, name: str):
         self.name = name
         self.tools: Dict[str, Any] = {}
+        self.resources: Dict[str, Dict[str, Any]] = {}
+        self.prompts: Dict[str, Dict[str, Any]] = {}
         self._startup_handler = None
         self._shutdown_handler = None
         self._sdk = _SDKFastMCP(name) if _SDKFastMCP is not None else None
@@ -70,6 +75,39 @@ class INATraceFastMCP:
             return fn
         return decorator
 
+    def resource(self, uri: str, name: Optional[str] = None, description: Optional[str] = None, mime_type: str = "application/json"):
+        def decorator(fn):
+            self.resources[uri] = {
+                "uri": uri,
+                "name": name or fn.__name__,
+                "description": description or (fn.__doc__ or "").strip(),
+                "mimeType": mime_type,
+                "handler": fn
+            }
+            if self._sdk is not None:
+                try:
+                    self._sdk.resource(uri)(fn)
+                except Exception:
+                    pass
+            return fn
+        return decorator
+
+    def prompt(self, name: Optional[str] = None, description: Optional[str] = None):
+        def decorator(fn):
+            p_name = name or fn.__name__
+            self.prompts[p_name] = {
+                "name": p_name,
+                "description": description or (fn.__doc__ or "").strip(),
+                "handler": fn
+            }
+            if self._sdk is not None and hasattr(self._sdk, "prompt"):
+                try:
+                    self._sdk.prompt()(fn)
+                except Exception:
+                    pass
+            return fn
+        return decorator
+
     def on_startup(self, fn):
         self._startup_handler = fn
         return fn
@@ -77,6 +115,108 @@ class INATraceFastMCP:
     def on_shutdown(self, fn):
         self._shutdown_handler = fn
         return fn
+
+    async def handle_jsonrpc_request(
+        self,
+        rpc_req: Dict[str, Any],
+        auth_header: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Standard MCP JSON-RPC 2.0 dispatcher supporting initialize, tools/list,
+        tools/call, resources/list, resources/read, prompts/list, prompts/get.
+        """
+        import inspect
+        import json as _json
+
+        req_id = rpc_req.get("id")
+        method = rpc_req.get("method", "")
+        params = rpc_req.get("params") or {}
+
+        def _ok(result_obj: Any) -> Dict[str, Any]:
+            return {"jsonrpc": "2.0", "id": req_id, "result": result_obj}
+
+        def _err(code: int, message: str) -> Dict[str, Any]:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+        try:
+            if method == "initialize":
+                return _ok({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": self.name, "version": "2.0.0"},
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                        "resources": {"subscribe": False, "listChanged": False},
+                        "prompts": {"listChanged": False}
+                    }
+                })
+            elif method == "tools/list":
+                return _ok({
+                    "tools": [
+                        {"name": k, "description": (fn.__doc__ or "").strip()}
+                        for k, fn in self.tools.items()
+                    ]
+                })
+            elif method == "tools/call":
+                tool_name = params.get("name")
+                arguments = params.get("arguments") or {}
+                if tool_name not in self.tools:
+                    return _err(-32601, f"Tool '{tool_name}' not found")
+                if auth_header:
+                    authorize_request(auth_header, tool_name)
+                res = await self.tools[tool_name](**arguments)
+                return _ok({
+                    "content": [{"type": "text", "text": _json.dumps(res, ensure_ascii=False)}],
+                    "structuredContent": res,
+                    "isError": False
+                })
+            elif method == "resources/list":
+                return _ok({
+                    "resources": [
+                        {
+                            "uri": r["uri"],
+                            "name": r["name"],
+                            "description": r["description"],
+                            "mimeType": r["mimeType"]
+                        }
+                        for r in self.resources.values()
+                    ]
+                })
+            elif method == "resources/read":
+                uri = params.get("uri")
+                if uri not in self.resources:
+                    return _err(-32602, f"Resource '{uri}' not found")
+                r_meta = self.resources[uri]
+                fn = r_meta["handler"]
+                val = await fn() if inspect.iscoroutinefunction(fn) else fn()
+                text_val = _json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list)) else str(val)
+                return _ok({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": r_meta["mimeType"],
+                        "text": text_val
+                    }]
+                })
+            elif method == "prompts/list":
+                return _ok({
+                    "prompts": [
+                        {"name": p["name"], "description": p["description"]}
+                        for p in self.prompts.values()
+                    ]
+                })
+            elif method == "prompts/get":
+                p_name = params.get("name")
+                p_args = params.get("arguments") or {}
+                if p_name not in self.prompts:
+                    return _err(-32602, f"Prompt '{p_name}' not found")
+                fn = self.prompts[p_name]["handler"]
+                val = await fn(**p_args) if inspect.iscoroutinefunction(fn) else fn(**p_args)
+                return _ok(val)
+            else:
+                return _err(-32601, f"Method '{method}' not supported")
+        except PermissionError as pe:
+            return _err(-32001, f"FORBIDDEN: {pe}")
+        except Exception as ex:
+            return _err(-32603, f"INTERNAL_ERROR: {ex}")
 
     async def _handle_http_client(self, reader, writer):
         import json as _json
@@ -123,6 +263,8 @@ class INATraceFastMCP:
                     "status": "ALIVE",
                     "server": self.name,
                     "tools_count": len(self.tools),
+                    "resources_count": len(self.resources),
+                    "prompts_count": len(self.prompts),
                     "whisp_source": "plotdeforestationanalysis"
                 })
             elif method == "GET" and path == "/health/ready":
@@ -140,14 +282,38 @@ class INATraceFastMCP:
                         for k, fn in self.tools.items()
                     ]
                 })
+            elif method == "GET" and path in ("/mcp/resources", "/resources"):
+                _send_json(200, "OK", {
+                    "server": self.name,
+                    "resources": [
+                        {
+                            "uri": r["uri"],
+                            "name": r["name"],
+                            "description": r["description"],
+                            "mimeType": r["mimeType"]
+                        }
+                        for r in self.resources.values()
+                    ]
+                })
+            elif method == "GET" and path in ("/mcp/prompts", "/prompts"):
+                _send_json(200, "OK", {
+                    "server": self.name,
+                    "prompts": [
+                        {"name": p["name"], "description": p["description"]}
+                        for p in self.prompts.values()
+                    ]
+                })
             elif method == "GET" and path == "/mcp/sse":
                 qs = parse_qs(parsed_url.query)
                 lot_id = qs.get("lotId", ["unknown"])[0]
                 event_payload = _json.dumps({
-                    "protocol": "mcp/1.0",
+                    "protocol": "mcp/2024-11-05",
                     "server": self.name,
                     "lotId": lot_id,
-                    "availableTools": list(self.tools.keys())
+                    "jsonrpcEndpoint": "/mcp",
+                    "availableTools": list(self.tools.keys()),
+                    "availableResources": list(self.resources.keys()),
+                    "availablePrompts": list(self.prompts.keys())
                 })
                 sse_body = f"event: endpoint\ndata: {event_payload}\n\n".encode("utf-8")
                 resp = (
@@ -159,6 +325,11 @@ class INATraceFastMCP:
                     f"Connection: close\r\n\r\n"
                 ).encode("utf-8") + sse_body
                 writer.write(resp)
+            elif method == "POST" and path in ("/mcp", "/jsonrpc"):
+                auth_header = headers.get("authorization")
+                rpc_req = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+                rpc_resp = await self.handle_jsonrpc_request(rpc_req, auth_header=auth_header)
+                _send_json(200, "OK", rpc_resp)
             elif method == "POST" and (path.startswith("/mcp/tools/") or path.startswith("/tools/")):
                 tool_name = path.rstrip("/").split("/")[-1]
                 if tool_name not in self.tools:
@@ -195,7 +366,7 @@ class INATraceFastMCP:
         server = await asyncio.start_server(self._handle_http_client, "0.0.0.0", settings.PORT)
         logger.info(
             f"INATrace MCP Server '{self.name}' listening on 0.0.0.0:{settings.PORT} "
-            f"with {len(self.tools)} canonical tools."
+            f"with {len(self.tools)} tools, {len(self.resources)} resources, and {len(self.prompts)} prompts."
         )
         try:
             async with server:
@@ -228,7 +399,6 @@ def authorize_request(bearer_token: Optional[str], tool_name: str) -> AuthContex
     return auth_ctx
 
 
-
 # --- LIFECYCLE HOOKS ---
 @mcp.on_startup
 async def startup():
@@ -244,6 +414,120 @@ async def shutdown():
     logger.info("Server shutdown complete.")
 
 
+# --- CANONICAL MCP RESOURCES ---
+
+@mcp.resource(
+    "inatrace://catalogs/dpa-ecuador",
+    name="Catálogo Territorial DPA INEC Ecuador",
+    description="Códigos territoriales DPA INEC de 6 dígitos con zero-padding mandatorio para zonas cacaoteras."
+)
+def resource_dpa_ecuador() -> Dict[str, Any]:
+    return {
+        "standard": "INEC-DPA-ECUADOR-6D",
+        "zero_padding_mandatory": True,
+        "parishes": [
+            {"dpa_code": "120550", "province": "LOS RIOS", "canton": "VINCES", "parish": "VINCES"},
+            {"dpa_code": "120551", "province": "LOS RIOS", "canton": "VINCES", "parish": "ANTONIO SOTOMAYOR"},
+            {"dpa_code": "130350", "province": "MANABI", "canton": "CHONE", "parish": "CHONE"},
+            {"dpa_code": "130352", "province": "MANABI", "canton": "CHONE", "parish": "CANUTO"},
+            {"dpa_code": "130250", "province": "MANABI", "canton": "BOLIVAR", "parish": "CALCETA"},
+            {"dpa_code": "091250", "province": "GUAYAS", "canton": "NARANJAL", "parish": "NARANJAL"},
+            {"dpa_code": "070150", "province": "EL ORO", "canton": "MACHALA", "parish": "MACHALA"}
+        ]
+    }
+
+
+@mcp.resource(
+    "inatrace://regulations/eudr-2023-1115",
+    name="Reglas de Validación EUDR 2023/1115 y MAG Acuerdo 023",
+    description="Umbrales regulatorios oficiales para deforestación cero, geometría WGS84 y conversión física de cacao."
+)
+def resource_eudr_regulations() -> Dict[str, Any]:
+    return {
+        "regulation": "EU Regulation 2023/1115 (EUDR)",
+        "deforestation_cutoff_date": "2020-12-31",
+        "geometry_rules": {
+            "smallholder_threshold_ha": 4.0,
+            "lte_4ha": "CENTROID_WGS84_MIN_6_DECIMALS",
+            "gt_4ha": "CLOSED_POLYGON_RING_NO_SELF_INTERSECTION"
+        },
+        "mass_balance_rules": {
+            "ecuador_regulation": "MAG Acuerdo Ministerial 023",
+            "quintal_to_lbs": 100.0,
+            "quintal_to_kg": 45.359237,
+            "export_bag_standard_kg": 69.0,
+            "tolerance_ratio": 1.05
+        }
+    }
+
+
+@mcp.resource(
+    "inatrace://schemas/sri-modulo11",
+    name="Especificación Clave de Acceso SRI y Algoritmo Módulo 11",
+    description="Estructura canónica de conciliación tributaria SRI de 49 dígitos y comentario idempotente ERP."
+)
+def resource_sri_schema() -> Dict[str, Any]:
+    return {
+        "standard": "SRI-ECUADOR-FICHA-TECNICA-COMPROBANTES-ELECTRONICOS",
+        "access_key_length": 49,
+        "check_digit_algorithm": "MODULO_11_WEIGHTS_2_TO_7",
+        "canonical_comment_template": "LC:{estab}-{pto}-{secuencial}|CA:{clave_acceso_49d}|ERP:{id_interno_erp}"
+    }
+
+
+# --- CANONICAL MCP PROMPTS ---
+
+@mcp.prompt(
+    name="auditoria_aduanera_eudr",
+    description="Secuencia guiada de inspección aduanera pre-arribo para puertos europeos (Róterdam, Hamburgo, Amberes)."
+)
+def prompt_auditoria_aduanera_eudr(lot_identifier: str = "784", company_id: int = 1) -> Dict[str, Any]:
+    return {
+        "description": f"Auditoría aduanera EUDR integral para el lote {lot_identifier} (Organización {company_id})",
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": (
+                        f"Actúa como Inspector Aduanero de la Unión Europea (DG SANTE / CSW-CERTEX). "
+                        f"Ejecuta la secuencia de verificación para el lote '{lot_identifier}' de la empresa {company_id}:\n"
+                        f"1. Invoca `audit_lot_traceability(lot_identifier='{lot_identifier}', company_id={company_id}, include_raw_coordinates=False)`.\n"
+                        f"2. Verifica `mass_balance.status` (ISO 22005 / MAG 023) y `security_audit.prompt_injection_detected`.\n"
+                        f"3. Invoca `verify_eudr_compliance` y `verify_sri_compliance` sobre el `stock_order_id` raíz.\n"
+                        f"4. Emite el dictamen final de liberación en puerto (Green Channel vs Hold Inspection)."
+                    )
+                }
+            }
+        ]
+    }
+
+
+@mcp.prompt(
+    name="diagnostico_forense_soporte_giz",
+    description="Protocolo de diagnóstico forense de soporte 60h GIZ (Solo Lectura) para incidentes multi-tenant y QR."
+)
+def prompt_diagnostico_forense_soporte_giz(company_id: int = 1, qr_url: str = "") -> Dict[str, Any]:
+    return {
+        "description": f"Diagnóstico forense de soporte técnico GIZ para la organización {company_id}",
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": (
+                        f"Actúa como Ingeniero Forense de Soporte Nivel 3 (Tier 4 GIZ Read-Only). "
+                        f"Analiza la salud operacional de la organización {company_id}:\n"
+                        f"1. Ejecuta `diagnose_tenant_health(company_id={company_id})` para auditar los Post-Mortems PM-033, PM-036, PM-037 y PM-040.\n"
+                        f"2. Si existe URL QR reportada ('{qr_url}'), ejecuta `diagnose_and_repair_qr(qr_payload='{qr_url}', company_id={company_id})`.\n"
+                        f"3. Entrega el reporte de causa raíz y el comando exacto de remediación."
+                    )
+                }
+            }
+        ]
+    }
+
+
 # --- CANONICAL TOOLS REGISTRATION ---
 
 # Tool 1: audit_lot_traceability
@@ -252,18 +536,23 @@ async def audit_lot_traceability(
     lot_identifier: str,
     company_id: int,
     include_plots: bool = True,
-    public_view: bool = False
+    public_view: bool = False,
+    include_raw_coordinates: bool = False,
+    require_completed_whisp: bool = False
 ) -> Dict[str, Any]:
     """
     Reconstruye retrospectivamente el Grafo DAG completo desde el saco de 69kg
     a través de fermentación y secado hasta cada parcela física y productor.
-    Si public_view=True, aplica el filtro de minimización LOPDP eliminando toda PII.
+    Incluye validación de balance de masas (ISO 22005), sanitización anti-Prompt Injection
+    (OWASP LLM01) y filtro de minimización LOPDP si public_view=True.
     """
     params = AuditLotInput(
         lot_identifier=lot_identifier,
         company_id=company_id,
         include_plots=include_plots,
-        public_view=public_view
+        public_view=public_view,
+        include_raw_coordinates=include_raw_coordinates,
+        require_completed_whisp=require_completed_whisp
     )
     return await execute_audit_lot_traceability(params)
 
@@ -272,17 +561,21 @@ async def audit_lot_traceability(
 @mcp.tool()
 async def verify_eudr_compliance(
     stock_order_id: int,
-    strict_polygon_closure: bool = True
+    strict_polygon_closure: bool = True,
+    include_raw_coordinates: bool = False,
+    require_completed_whisp: bool = False
 ) -> Dict[str, Any]:
     """
     Audita el cumplimiento del Reglamento de Deforestación de la UE (EUDR 2023/1115):
     - Cierre de anillo topológico WGS84 para predios > 4.0 ha.
     - Precisión de centroide (>= 6 decimales) para predios <= 4.0 ha.
-    - Dictamen de corte de no deforestación posterior al 31/12/2020.
+    - Dictamen de corte de no deforestación posterior al 31/12/2020 (tri-state Whisp).
     """
     params = VerifyEudrInput(
         stock_order_id=stock_order_id,
-        strict_polygon_closure=strict_polygon_closure
+        strict_polygon_closure=strict_polygon_closure,
+        include_raw_coordinates=include_raw_coordinates,
+        require_completed_whisp=require_completed_whisp
     )
     return await execute_verify_eudr_compliance(params)
 
