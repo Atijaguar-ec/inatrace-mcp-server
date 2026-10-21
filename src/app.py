@@ -66,6 +66,7 @@ class INATraceFastMCP:
         self.prompts: Dict[str, Dict[str, Any]] = {}
         self._startup_handler = None
         self._shutdown_handler = None
+        self._asgi_app = None
         self._sdk = _SDKFastMCP(name) if _SDKFastMCP is not None else None
 
     def tool(self):
@@ -228,175 +229,45 @@ class INATraceFastMCP:
         except Exception as ex:
             return _err(-32603, f"INTERNAL_ERROR: {ex}")
 
-    async def _handle_http_client(self, reader, writer):
-        import json as _json
-        from urllib.parse import urlparse, parse_qs
-        from src.infrastructure.db_pool import get_db_pool
-
-        try:
-            request_line = await reader.readline()
-            if not request_line:
-                writer.close()
-                return
-            parts = request_line.decode("utf-8", errors="ignore").strip().split(" ")
-            method = parts[0] if len(parts) > 0 else "GET"
-            raw_path = parts[1] if len(parts) > 1 else "/"
-            parsed_url = urlparse(raw_path)
-            path = parsed_url.path
-
-            headers: Dict[str, str] = {}
-            while True:
-                line = await reader.readline()
-                if not line or line in (b"\r\n", b"\n"):
-                    break
-                hline = line.decode("utf-8", errors="ignore").strip()
-                if ":" in hline:
-                    k, v = hline.split(":", 1)
-                    headers[k.strip().lower()] = v.strip()
-
-            content_length = int(headers.get("content-length", "0"))
-            body_bytes = await reader.readexactly(content_length) if content_length > 0 else b""
-
-            def _send_json(status_code: int, status_text: str, payload: Dict[str, Any]):
-                body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                resp = (
-                    f"HTTP/1.1 {status_code} {status_text}\r\n"
-                    f"Content-Type: application/json; charset=utf-8\r\n"
-                    f"Content-Length: {len(body)}\r\n"
-                    f"Link: </mcp/sse>; rel=\"modelcontextprotocol\"\r\n"
-                    f"Connection: close\r\n\r\n"
-                ).encode("utf-8") + body
-                writer.write(resp)
-
-            if method == "GET" and path in ("/health/live", "/health"):
-                _send_json(200, "OK", {
-                    "status": "ALIVE",
-                    "server": self.name,
-                    "tools_count": len(self.tools),
-                    "resources_count": len(self.resources),
-                    "prompts_count": len(self.prompts),
-                    "whisp_source": "plotdeforestationanalysis"
-                })
-            elif method == "GET" and path == "/health/ready":
-                pool = get_db_pool()
-                _send_json(200 if pool else 503, "OK" if pool else "Service Unavailable", {
-                    "status": "READY" if pool else "DEGRADED",
-                    "db_pool_connected": pool is not None,
-                    "whisp_table": "plotdeforestationanalysis"
-                })
-            elif method == "GET" and path in ("/mcp/tools", "/tools"):
-                _send_json(200, "OK", {
-                    "server": self.name,
-                    "tools": [
-                        {"name": k, "description": (fn.__doc__ or "").strip()}
-                        for k, fn in self.tools.items()
-                    ]
-                })
-            elif method == "GET" and path in ("/mcp/resources", "/resources"):
-                _send_json(200, "OK", {
-                    "server": self.name,
-                    "resources": [
-                        {
-                            "uri": r["uri"],
-                            "name": r["name"],
-                            "description": r["description"],
-                            "mimeType": r["mimeType"]
-                        }
-                        for r in self.resources.values()
-                    ]
-                })
-            elif method == "GET" and path in ("/mcp/prompts", "/prompts"):
-                _send_json(200, "OK", {
-                    "server": self.name,
-                    "prompts": [
-                        {"name": p["name"], "description": p["description"]}
-                        for p in self.prompts.values()
-                    ]
-                })
-            elif method == "GET" and path == "/mcp/sse":
-                qs = parse_qs(parsed_url.query)
-                lot_id = qs.get("lotId", ["unknown"])[0]
-                event_payload = _json.dumps({
-                    "protocol": "mcp/2024-11-05",
-                    "server": self.name,
-                    "lotId": lot_id,
-                    "jsonrpcEndpoint": "/mcp",
-                    "availableTools": list(self.tools.keys()),
-                    "availableResources": list(self.resources.keys()),
-                    "availablePrompts": list(self.prompts.keys())
-                })
-                sse_body = f"event: endpoint\ndata: {event_payload}\n\n".encode("utf-8")
-                resp = (
-                    f"HTTP/1.1 200 OK\r\n"
-                    f"Content-Type: text/event-stream\r\n"
-                    f"Cache-Control: no-cache\r\n"
-                    f"Link: </mcp/sse?lotId={lot_id}>; rel=\"modelcontextprotocol\"\r\n"
-                    f"Content-Length: {len(sse_body)}\r\n"
-                    f"Connection: close\r\n\r\n"
-                ).encode("utf-8") + sse_body
-                writer.write(resp)
-            elif method == "POST" and path in ("/mcp", "/jsonrpc"):
-                auth_header = headers.get("authorization")
-                rpc_req = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
-                rpc_resp = await self.handle_jsonrpc_request(rpc_req, auth_header=auth_header)
-                _send_json(200, "OK", rpc_resp)
-            elif method == "POST" and (path.startswith("/mcp/tools/") or path.startswith("/tools/")):
-                tool_name = path.rstrip("/").split("/")[-1]
-                if tool_name not in self.tools:
-                    _send_json(404, "Not Found", {"error": f"Tool '{tool_name}' not found"})
-                else:
-                    auth_header = headers.get("authorization")
-                    try:
-                        # Authorization is unconditional: a missing header resolves to
-                        # TIER_1_PUBLIC, it does not skip the check.
-                        params = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
-                        result = await execute_authorized_tool(
-                            self.tools[tool_name], tool_name, params, auth_header
-                        )
-                        _send_json(200, "OK", result)
-                    except PermissionError as pe:
-                        _send_json(403, "Forbidden", {"error": "FORBIDDEN", "message": str(pe)})
-                    except DatabaseUnavailableError as due:
-                        _send_json(503, "Service Unavailable", {"error": "DATABASE_UNAVAILABLE", "message": str(due)})
-                    except ServiceTokenUnavailableError as ste:
-                        _send_json(503, "Service Unavailable", {"error": "SERVICE_TOKEN_UNAVAILABLE", "message": str(ste)})
-                    except Exception as ex:
-                        _send_json(400, "Bad Request", {"error": "EXECUTION_ERROR", "message": str(ex)})
-            else:
-                _send_json(404, "Not Found", {"error": "NOT_FOUND", "path": path})
-
-            await writer.drain()
-        except Exception as exc:
-            logger.error(f"HTTP handler error: {exc}")
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-
-    async def serve_forever(self):
-        import asyncio
+    async def run_startup(self) -> None:
+        """Lifespan hook invoked by the ASGI application on startup."""
         if self._startup_handler:
             await self._startup_handler()
-        server = await asyncio.start_server(self._handle_http_client, "0.0.0.0", settings.PORT)
-        logger.info(
-            f"INATrace MCP Server '{self.name}' listening on 0.0.0.0:{settings.PORT} "
-            f"with {len(self.tools)} tools, {len(self.resources)} resources, and {len(self.prompts)} prompts."
-        )
-        try:
-            async with server:
-                await server.serve_forever()
-        finally:
-            if self._shutdown_handler:
-                await self._shutdown_handler()
+
+    async def run_shutdown(self) -> None:
+        """Lifespan hook invoked by the ASGI application on shutdown."""
+        if self._shutdown_handler:
+            await self._shutdown_handler()
+
+    @property
+    def asgi_app(self):
+        """
+        The Starlette application. Built on first access so that importing this
+        module stays cheap and test suites can import `mcp` without a transport.
+        """
+        if self._asgi_app is None:
+            from src.http_transport import build_app
+            self._asgi_app = build_app(self)
+        return self._asgi_app
 
     def run(self):
-        import asyncio
-        try:
-            asyncio.run(self.serve_forever())
-        except KeyboardInterrupt:
-            logger.info("Server stopped by signal.")
+        """
+        Serves over HTTP/SSE with Uvicorn.
+
+        Replaces the previous hand-rolled asyncio server, which parsed HTTP by hand
+        with no request size limit, no read timeouts and no connection limits.
+        """
+        import uvicorn
+
+        uvicorn.run(
+            self.asgi_app,
+            host="0.0.0.0",
+            port=settings.PORT,
+            log_config=None,
+            timeout_keep_alive=settings.KEEP_ALIVE_TIMEOUT_SECONDS,
+            h11_max_incomplete_event_size=settings.MAX_REQUEST_BYTES,
+            access_log=bool(settings.DEBUG),
+        )
 
 
 mcp = INATraceFastMCP(settings.SERVER_NAME)

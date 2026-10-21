@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     PORT: int = int(os.getenv("PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
+    # Transporte HTTP (Starlette / Uvicorn)
+    # MAX_REQUEST_BYTES acota la memoria que puede consumir una sola petición;
+    # los cuerpos JSON-RPC legítimos de este servidor son de pocos kilobytes.
+    MAX_REQUEST_BYTES: int = int(os.getenv("MAX_REQUEST_BYTES", str(1024 * 1024)))
+    BODY_READ_TIMEOUT_SECONDS: float = float(os.getenv("BODY_READ_TIMEOUT_SECONDS", "15.0"))
+    TOOL_TIMEOUT_SECONDS: float = float(os.getenv("TOOL_TIMEOUT_SECONDS", "30.0"))
+    KEEP_ALIVE_TIMEOUT_SECONDS: int = int(os.getenv("KEEP_ALIVE_TIMEOUT_SECONDS", "5"))
+
     # Base de Datos PostgreSQL 16 (Modo Solo Lectura)
     DB_HOST: str = os.getenv("DB_HOST", "localhost")
     DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
