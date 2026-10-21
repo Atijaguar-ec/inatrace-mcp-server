@@ -18,6 +18,38 @@ except ImportError:
 _pool: Optional[Any] = None
 
 
+class DatabaseUnavailableError(RuntimeError):
+    """
+    Raised when a tool requires the read-only PostgreSQL pool and it is not available.
+
+    The server MUST fail closed: a regulatory oracle that cannot read the source of
+    truth has to report the outage, never substitute synthetic or demonstration data.
+    """
+
+    def __init__(self, operation: str = "operación"):
+        super().__init__(
+            f"Base de datos no disponible: no se puede completar '{operation}' sin el pool "
+            f"de solo lectura '{settings.DB_USER}'. El servidor no emite dictámenes sin "
+            f"consultar la fuente de verdad."
+        )
+        self.operation = operation
+
+
+def require_db_pool(operation: str = "operación") -> Any:
+    """
+    Returns the active read-only pool or raises DatabaseUnavailableError.
+
+    Single fail-closed entry point for every tool that reads traceability data.
+    """
+    pool = get_db_pool()
+    if pool is None:
+        logger.error(
+            f"Rechazada '{operation}': el pool de PostgreSQL no está inicializado."
+        )
+        raise DatabaseUnavailableError(operation)
+    return pool
+
+
 async def init_db_pool() -> Optional[Any]:
     """
     Initializes the asyncpg connection pool with strict read-only security.

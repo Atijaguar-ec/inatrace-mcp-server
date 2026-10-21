@@ -7,7 +7,7 @@ ERP and Weighing Scale Interoperability Tools (CQRS Architecture):
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from src.infrastructure.spring_client import spring_client
-from src.infrastructure.db_pool import get_db_pool
+from src.infrastructure.db_pool import require_db_pool
 from src.domain.sri_validator import (
     validate_sri_access_key,
     parse_canonical_sri_comment,
@@ -159,18 +159,13 @@ async def execute_verify_sri_compliance(params: VerifySriInput) -> Dict[str, Any
     """
     Audits an existing StockOrder comments field for SRI compliance and idempotency.
     """
-    pool = get_db_pool()
-    comments = None
+    pool = require_db_pool("verify_sri_compliance")
 
-    if pool:
-        async with pool.acquire() as conn:
-            comments = await conn.fetchval(
-                "SELECT comments FROM stockorder WHERE id = $1", 
-                params.stock_order_id
-            )
-    else:
-        # Fallback simulation
-        comments = "LC:001-002-000001234|CA:1110202601099234567800110010020000012341234567812|ERP:ERP-8841"
+    async with pool.acquire() as conn:
+        comments = await conn.fetchval(
+            "SELECT comments FROM stockorder WHERE id = $1",
+            params.stock_order_id
+        )
 
     if not comments:
         return {

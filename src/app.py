@@ -8,7 +8,7 @@ import logging
 from typing import Dict, Any, Optional
 
 from src.config import settings
-from src.infrastructure.db_pool import init_db_pool, close_db_pool
+from src.infrastructure.db_pool import init_db_pool, close_db_pool, DatabaseUnavailableError
 from src.tools.audit_tools import (
     AuditLotInput, VerifyEudrInput,
     execute_audit_lot_traceability, execute_verify_eudr_compliance
@@ -26,7 +26,8 @@ from src.tools.diagnostic_tools import (
     execute_diagnose_tenant_health, execute_diagnose_and_repair_qr
 )
 from src.infrastructure.keycloak_guard import (
-    verify_keycloak_token, check_tier_permission, AccessTier, AuthContext
+    verify_keycloak_token, check_tier_permission, enforce_tier_arguments,
+    AccessTier, AuthContext
 )
 
 
@@ -161,8 +162,10 @@ class INATraceFastMCP:
                 arguments = params.get("arguments") or {}
                 if tool_name not in self.tools:
                     return _err(-32601, f"Tool '{tool_name}' not found")
-                if auth_header:
-                    authorize_request(auth_header, tool_name)
+                # Authorization is unconditional: a missing header resolves to
+                # TIER_1_PUBLIC, it does not skip the check.
+                auth_ctx = authorize_request(auth_header, tool_name)
+                arguments, _ = enforce_tier_arguments(auth_ctx.tier, tool_name, arguments)
                 res = await self.tools[tool_name](**arguments)
                 return _ok({
                     "content": [{"type": "text", "text": _json.dumps(res, ensure_ascii=False)}],
@@ -215,6 +218,8 @@ class INATraceFastMCP:
                 return _err(-32601, f"Method '{method}' not supported")
         except PermissionError as pe:
             return _err(-32001, f"FORBIDDEN: {pe}")
+        except DatabaseUnavailableError as due:
+            return _err(-32002, f"DATABASE_UNAVAILABLE: {due}")
         except Exception as ex:
             return _err(-32603, f"INTERNAL_ERROR: {ex}")
 
@@ -337,13 +342,17 @@ class INATraceFastMCP:
                 else:
                     auth_header = headers.get("authorization")
                     try:
-                        if auth_header:
-                            authorize_request(auth_header, tool_name)
+                        # Authorization is unconditional: a missing header resolves to
+                        # TIER_1_PUBLIC, it does not skip the check.
+                        auth_ctx = authorize_request(auth_header, tool_name)
                         params = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+                        params, _ = enforce_tier_arguments(auth_ctx.tier, tool_name, params)
                         result = await self.tools[tool_name](**params)
                         _send_json(200, "OK", result)
                     except PermissionError as pe:
                         _send_json(403, "Forbidden", {"error": "FORBIDDEN", "message": str(pe)})
+                    except DatabaseUnavailableError as due:
+                        _send_json(503, "Service Unavailable", {"error": "DATABASE_UNAVAILABLE", "message": str(due)})
                     except Exception as ex:
                         _send_json(400, "Bad Request", {"error": "EXECUTION_ERROR", "message": str(ex)})
             else:

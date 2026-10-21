@@ -67,6 +67,19 @@ TIER_PERMITTED_TOOLS: Dict[AccessTier, List[str]] = {
 }
 
 
+# Arguments the server imposes on a tool call regardless of what the caller asked for.
+# The privacy posture of a response is a consequence of the resolved tier, never a
+# parameter the client gets to choose (LOPDP Art. 10 / GDPR Art. 5 data minimization).
+TIER_FORCED_ARGUMENTS: Dict[AccessTier, Dict[str, Dict[str, Any]]] = {
+    AccessTier.TIER_1_PUBLIC: {
+        "audit_lot_traceability": {
+            "public_view": True,
+            "include_raw_coordinates": False
+        }
+    }
+}
+
+
 class AuthContext(BaseModel):
     tier: AccessTier
     user_id: str
@@ -191,3 +204,36 @@ def check_tier_permission(tier: AccessTier, tool_name: str) -> bool:
     """
     permitted = TIER_PERMITTED_TOOLS.get(tier, [])
     return tool_name in permitted
+
+
+def enforce_tier_arguments(
+    tier: AccessTier,
+    tool_name: str,
+    arguments: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Applies the server-side argument policy for the resolved tier.
+
+    A Tier 1 public consumer cannot opt out of the privacy gate by passing
+    public_view=False or include_raw_coordinates=True: those arguments are
+    overwritten here, before the tool ever sees them.
+
+    Returns: (effective_arguments, list_of_overridden_argument_names)
+    """
+    forced = TIER_FORCED_ARGUMENTS.get(tier, {}).get(tool_name)
+    if not forced:
+        return dict(arguments), []
+
+    effective = dict(arguments)
+    overridden: List[str] = []
+    for key, value in forced.items():
+        if effective.get(key) != value:
+            overridden.append(key)
+        effective[key] = value
+
+    if overridden:
+        logger.info(
+            f"Política de tier {tier.value} aplicada sobre '{tool_name}': "
+            f"argumentos forzados {overridden}."
+        )
+    return effective, overridden

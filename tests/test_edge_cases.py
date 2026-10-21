@@ -19,9 +19,18 @@ from src.domain.traces_ld import format_dpa_code, build_traces_jsonld
 from src.domain.privacy import sanitize_for_public_b2c
 from src.tools.erp_tools import execute_ingest_erp_purchase_order, IngestErpPurchaseInput
 from src.tools.diagnostic_tools import execute_diagnose_and_repair_qr, DiagnoseQrInput
+from src.infrastructure.db_pool import set_db_pool
+from tests.fixtures import build_fake_pool
 
 
 class TestEdgeCases(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        # QR diagnosis now requires the read-only pool instead of assuming the lot exists.
+        set_db_pool(build_fake_pool())
+
+    def tearDown(self):
+        set_db_pool(None)
 
     # --- 1. SRI MODULO 11 BOUNDARY CASES ---
     def test_modulo11_check_digit_special_cases(self):

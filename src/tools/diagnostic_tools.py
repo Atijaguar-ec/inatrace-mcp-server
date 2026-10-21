@@ -7,7 +7,7 @@ import re
 import json
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
-from src.infrastructure.db_pool import get_db_pool
+from src.infrastructure.db_pool import require_db_pool
 
 
 class DiagnoseTenantHealthInput(BaseModel):
@@ -28,25 +28,8 @@ async def execute_diagnose_tenant_health(params: DiagnoseTenantHealthInput) -> D
     - PM-040: DPA zero-padding integrity.
     - Config: Multi-tenant configuration coherence.
     """
-    pool = get_db_pool()
+    pool = require_db_pool("diagnose_tenant_health")
     issues: List[Dict[str, Any]] = []
-
-    if not pool:
-        # Standalone mock scan
-        return {
-            "company_id": params.company_id,
-            "status": "HEALTHY",
-            "healthy": True,
-            "issues_count": 0,
-            "diagnostics": [],
-            "post_mortems_verified": ["PM-033", "PM-036", "PM-037", "PM-040"],
-            "configuration": {
-                "enableDeliveryReceipt": True,
-                "enablePublicDeliveryReceipt": True,
-                "enableQuotaBalance": True,
-                "quotaAlertThresholdPercent": 80
-            }
-        }
 
     async with pool.acquire() as conn:
         # 1. PM-033: Verify OWNER role in productcompany
@@ -130,6 +113,7 @@ async def execute_diagnose_tenant_health(params: DiagnoseTenantHealthInput) -> D
 
         return {
             "company_id": params.company_id,
+            "data_source": "DATABASE",
             "status": "HEALTHY" if not issues else "ISSUES_DETECTED",
             "healthy": len(issues) == 0,
             "issues_count": len(issues),
@@ -167,36 +151,31 @@ async def execute_diagnose_and_repair_qr(params: DiagnoseQrInput) -> Dict[str, A
     is_uuid = bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", extracted_id, re.IGNORECASE))
     is_numeric_id = extracted_id.isdigit()
 
-    pool = get_db_pool()
+    pool = require_db_pool("diagnose_and_repair_qr")
     lot_found = False
     company_config_ok = True
     company_id = params.company_id or 1
 
-    if pool:
-        async with pool.acquire() as conn:
-            # Check lot existence
-            row = await conn.fetchrow(
-                "SELECT id, company_id, qrcodetag FROM stockorder WHERE (qrcodetag = $1 OR identifier = $1 OR id::text = $1)",
-                extracted_id
-            )
-            if row:
-                lot_found = True
-                company_id = row["company_id"]
+    async with pool.acquire() as conn:
+        # Check lot existence
+        row = await conn.fetchrow(
+            "SELECT id, company_id, qrcodetag FROM stockorder WHERE (qrcodetag = $1 OR identifier = $1 OR id::text = $1)",
+            extracted_id
+        )
+        if row:
+            lot_found = True
+            company_id = row["company_id"]
 
-            # Check company configuration
-            cfg_row = await conn.fetchrow("SELECT configuration FROM company WHERE id = $1", company_id)
-            if cfg_row and cfg_row["configuration"]:
-                cfg = cfg_row["configuration"]
-                if isinstance(cfg, str):
-                    try:
-                        cfg = json.loads(cfg)
-                    except Exception:
-                        cfg = {}
-                company_config_ok = bool(cfg.get("enablePublicDeliveryReceipt", False))
-    else:
-        # Mock diagnosis
-        lot_found = True
-        company_config_ok = True
+        # Check company configuration
+        cfg_row = await conn.fetchrow("SELECT configuration FROM company WHERE id = $1", company_id)
+        if cfg_row and cfg_row["configuration"]:
+            cfg = cfg_row["configuration"]
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except Exception:
+                    cfg = {}
+            company_config_ok = bool(cfg.get("enablePublicDeliveryReceipt", False))
 
     # Root Cause Diagnosis
     diagnosis = "OK"

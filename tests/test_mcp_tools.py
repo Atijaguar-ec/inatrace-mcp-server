@@ -16,11 +16,17 @@ from src.app import (
     diagnose_and_repair_qr
 )
 from src.domain.sri_validator import calculate_modulo11_check_digit
+from src.infrastructure.db_pool import set_db_pool
+from tests.fixtures import build_fake_pool
 
 
 class TestMcpTools(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
+        # The tools no longer fabricate data when the pool is absent, so every
+        # read path has to be backed by a pool here.
+        set_db_pool(build_fake_pool())
+
         first_48 = "111020260109923456780011001002000001234123456781"
         chk = calculate_modulo11_check_digit(first_48)
         self.valid_sri_key = first_48 + str(chk)
@@ -36,6 +42,7 @@ class TestMcpTools(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.patcher_put.stop()
         self.patcher_post.stop()
+        set_db_pool(None)
 
     async def test_audit_lot_traceability_dossier(self):
         res = await audit_lot_traceability(
