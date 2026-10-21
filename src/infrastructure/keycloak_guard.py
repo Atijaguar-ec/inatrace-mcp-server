@@ -191,6 +191,11 @@ class JwksCache:
                     f"puedan verificarse se degradan a Tier 1."
                 )
 
+    @property
+    def key_count(self) -> int:
+        """Signing keys currently cached. Zero means no token can be verified."""
+        return len(self._keys)
+
     def clear(self) -> None:
         """Test and lifecycle helper: drops cached keys."""
         self._keys = {}

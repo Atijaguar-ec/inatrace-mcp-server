@@ -12,51 +12,97 @@ from src.config import settings
 logger = logging.getLogger("inatrace-mcp.spring")
 
 
+class ServiceTokenUnavailableError(RuntimeError):
+    """
+    Raised when no Keycloak service-account token can be obtained.
+
+    The write path must fail closed: delegating a transactional write to the Core
+    with an invalid bearer masks a misconfiguration behind what looks like a
+    business rejection, and leaves the operator guessing.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(
+            f"No se pudo obtener el token de la cuenta de servicio de Keycloak: {reason}. "
+            f"No se delega ninguna escritura al Core sin credencial válida."
+        )
+        self.reason = reason
+
+
 class SpringCoreClient:
     """Client for INATrace Spring Boot Core REST API."""
 
     def __init__(self):
         self.base_url = settings.CORE_API_URL.rstrip('/')
-        self.keycloak_url = settings.KEYCLOAK_URL.rstrip('/')
-        self.realm = settings.KEYCLOAK_REALM
-        self.client_id = settings.SERVICE_ACCOUNT_CLIENT_ID
-        self.client_secret = settings.SERVICE_ACCOUNT_CLIENT_SECRET
         self._cached_token: Optional[str] = None
         self._token_expires_at: float = 0.0
+
+    @property
+    def keycloak_url(self) -> str:
+        return settings.KEYCLOAK_URL.rstrip('/')
+
+    @property
+    def realm(self) -> str:
+        return settings.KEYCLOAK_REALM
+
+    @property
+    def client_id(self) -> str:
+        return settings.SERVICE_ACCOUNT_CLIENT_ID
 
     async def get_service_token(self) -> str:
         """
         Retrieves or refreshes an OAuth2 Bearer token from Keycloak using client credentials.
+
+        Raises ServiceTokenUnavailableError if Keycloak is unreachable, rejects the
+        credentials, or no client secret is configured.
         """
         now = time.time()
         if self._cached_token and now < (self._token_expires_at - 60):
             return self._cached_token
 
+        client_secret = settings.SERVICE_ACCOUNT_CLIENT_SECRET
+        if not client_secret:
+            logger.error(
+                "SERVICE_ACCOUNT_CLIENT_SECRET está vacío: no se puede autenticar la "
+                "cuenta de servicio contra Keycloak."
+            )
+            raise ServiceTokenUnavailableError("SERVICE_ACCOUNT_CLIENT_SECRET no configurado")
+
         token_url = f"{self.keycloak_url}/realms/{self.realm}/protocol/openid-connect/token"
         data = {
             "grant_type": "client_credentials",
             "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            "client_secret": client_secret,
         }
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(token_url, data=data)
-                if resp.status_code == 200:
-                    payload = resp.json()
-                    self._cached_token = payload["access_token"]
-                    expires_in = payload.get("expires_in", 300)
-                    self._token_expires_at = now + expires_in
-                    logger.info("Successfully acquired Keycloak service account token.")
-                    return self._cached_token
-                else:
-                    logger.warning(
-                        f"Keycloak token endpoint returned {resp.status_code}: {resp.text}"
-                    )
-                    return "mock-service-token-dev"
         except Exception as exc:
-            logger.warning(f"Unable to reach Keycloak at {token_url}: {exc}. Using fallback token.")
-            return "mock-service-token-dev"
+            logger.error(f"Keycloak inalcanzable en {token_url}: {exc}")
+            raise ServiceTokenUnavailableError(f"Keycloak inalcanzable en {token_url}: {exc}") from exc
+
+        if resp.status_code != 200:
+            logger.error(
+                f"El endpoint de token de Keycloak devolvió {resp.status_code} para el "
+                f"cliente '{self.client_id}'."
+            )
+            raise ServiceTokenUnavailableError(
+                f"Keycloak respondió {resp.status_code} al solicitar el token de "
+                f"'{self.client_id}'"
+            )
+
+        try:
+            payload = resp.json()
+            access_token = payload["access_token"]
+        except Exception as exc:
+            logger.error(f"Respuesta de token de Keycloak ilegible: {exc}")
+            raise ServiceTokenUnavailableError(f"respuesta de token ilegible: {exc}") from exc
+
+        self._cached_token = access_token
+        self._token_expires_at = now + payload.get("expires_in", 300)
+        logger.info("Token de cuenta de servicio de Keycloak obtenido correctamente.")
+        return access_token
 
     async def put_stock_order(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -31,6 +31,7 @@ from src.infrastructure.keycloak_guard import (
     AccessTier, AuthContext
 )
 from src.infrastructure.auth_scope import set_tenant_scope, reset_tenant_scope
+from src.infrastructure.spring_client import ServiceTokenUnavailableError
 
 
 # Structured Logging according to ISO/IEC 27001
@@ -222,6 +223,8 @@ class INATraceFastMCP:
             return _err(-32001, f"FORBIDDEN: {pe}")
         except DatabaseUnavailableError as due:
             return _err(-32002, f"DATABASE_UNAVAILABLE: {due}")
+        except ServiceTokenUnavailableError as ste:
+            return _err(-32003, f"SERVICE_TOKEN_UNAVAILABLE: {ste}")
         except Exception as ex:
             return _err(-32603, f"INTERNAL_ERROR: {ex}")
 
@@ -355,6 +358,8 @@ class INATraceFastMCP:
                         _send_json(403, "Forbidden", {"error": "FORBIDDEN", "message": str(pe)})
                     except DatabaseUnavailableError as due:
                         _send_json(503, "Service Unavailable", {"error": "DATABASE_UNAVAILABLE", "message": str(due)})
+                    except ServiceTokenUnavailableError as ste:
+                        _send_json(503, "Service Unavailable", {"error": "SERVICE_TOKEN_UNAVAILABLE", "message": str(ste)})
                     except Exception as ex:
                         _send_json(400, "Bad Request", {"error": "EXECUTION_ERROR", "message": str(ex)})
             else:
@@ -463,7 +468,17 @@ async def startup():
             f"Audiencias aceptadas: {accepted_audiences()}."
         )
         await jwks_cache.get_key("__warmup__")
-        logger.info(f"JWKS precargado desde {jwks_url()}.")
+        if jwks_cache.key_count:
+            logger.info(
+                f"JWKS precargado desde {jwks_url()}: "
+                f"{jwks_cache.key_count} clave(s) de firma."
+            )
+        else:
+            logger.error(
+                f"No hay claves de firma disponibles desde {jwks_url()}. Mientras siga "
+                f"así, TODO token se rechaza y los canales autenticados (aduanas, ERP, "
+                f"soporte) quedan inoperantes. El canal público Tier 1 no se ve afectado."
+            )
 
     logger.info("Server startup complete. Ready for tool requests.")
 

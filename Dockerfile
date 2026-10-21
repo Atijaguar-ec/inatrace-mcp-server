@@ -1,15 +1,24 @@
 # Dockerfile para inatrace-mcp-server (Python 3.11 + uv)
-# Optimizado para arranque en frío ultrarrápido y footprint < 140MB
+# Build reproducible: versiones resueltas desde uv.lock y verificadas por hash.
 FROM python:3.11-slim AS builder
 
-# Instalar gestor ultra-rápido uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# Versión de uv fijada: un tag móvil (:latest) hace el build irreproducible y
+# convierte la imagen del gestor en una vía de compromiso de la cadena de suministro.
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /bin/uv
 
 WORKDIR /app
-COPY pyproject.toml .
 
-# Instalar dependencias en el entorno del sistema
-RUN uv pip install --system -r pyproject.toml
+# uv.lock es la fuente de verdad de las versiones; pyproject.toml solo declara rangos.
+COPY pyproject.toml uv.lock ./
+
+# 'uv lock --check' aborta el build si uv.lock no corresponde a pyproject.toml. Es
+# imprescindible: --frozen solo impide re-resolver, de modo que por sí mismo exportaría
+# el lock obsoleto ignorando en silencio una dependencia añadida sin re-lock.
+# --require-hashes rechaza cualquier artefacto cuyo hash no coincida con el registrado
+# en el lock (ISO/IEC 27001, trazabilidad de cadena de suministro).
+RUN uv lock --check \
+ && uv export --frozen --no-dev --no-emit-project -o requirements.txt \
+ && uv pip install --system --require-hashes -r requirements.txt
 
 # Etapa final de producción (mínimo peso)
 FROM python:3.11-slim
