@@ -51,3 +51,10 @@ exclude_also = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.uv]
+# Es una aplicación que se ejecuta con `python -m src.app`, no un paquete
+# distribuible: los imports son `src.*` desde la raíz del repositorio. Sin esto,
+# `uv run` y `uv sync` intentan construir un wheel y hatchling falla porque no
+# existe ningún directorio que coincida con el nombre del proyecto.
+package = false

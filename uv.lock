@@ -526,7 +526,7 @@ wheels = [
 [[package]]
 name = "inatrace-mcp-server"
 version = "1.0.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "asyncpg" },
     { name = "httpx" },

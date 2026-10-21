@@ -26,7 +26,7 @@ jobs:
       # comportamiento correcto en producción pero haría fallar las pruebas de tier.
       KEYCLOAK_AUDIENCE: inatrace-mcp
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Instalar uv ${{ env.UV_VERSION }}
         run: |
@@ -54,7 +54,7 @@ jobs:
     name: Imagen y arranque
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Construir la imagen
         run: docker build -t inatrace-mcp-server:ci .
