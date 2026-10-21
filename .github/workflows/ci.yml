@@ -1,0 +1,113 @@
+name: CI
+
+# Hace de la suite una compuerta automática. Hasta ahora era un paso manual, y por
+# eso se certificó en verde una ejecución de 73 pruebas en un intérprete que no
+# tenía instaladas mcp, asyncpg, shapely, pyproj ni python-jose: las rutas
+# degradadas por ImportError pasaban todas.
+
+on:
+  push:
+    branches: [staging, main]
+  pull_request:
+    branches: [staging, main]
+  workflow_dispatch:
+
+# Versión alineada con la fijada en el Dockerfile: el build y el CI deben resolver
+# las dependencias con el mismo gestor.
+env:
+  UV_VERSION: "0.11.7"
+
+jobs:
+  tests:
+    name: Pruebas y cobertura
+    runs-on: ubuntu-latest
+    env:
+      # Sin audiencia configurada el guard rechaza todo token, que es el
+      # comportamiento correcto en producción pero haría fallar las pruebas de tier.
+      KEYCLOAK_AUDIENCE: inatrace-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv ${{ env.UV_VERSION }}
+        run: |
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verificar que uv.lock corresponde a pyproject.toml
+        run: uv lock --check
+
+      - name: Instalar dependencias desde el lock
+        run: |
+          uv venv
+          uv pip install -r pyproject.toml --extra dev
+
+      - name: Ejecutar la suite
+        # run_tests.py aborta con código 2 si falta alguna dependencia declarada,
+        # de modo que una ejecución degradada no puede pasar por verde.
+        run: uv run coverage run tests/run_tests.py
+
+      - name: Informe de cobertura
+        # Falla si cae por debajo del umbral fijado en [tool.coverage.report].
+        run: uv run coverage report
+
+  image:
+    name: Imagen y arranque
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construir la imagen
+        run: docker build -t inatrace-mcp-server:ci .
+
+      - name: Verificar usuario no root
+        run: |
+          user=$(docker inspect inatrace-mcp-server:ci --format '{{.Config.User}}')
+          test "$user" = "1000" || { echo "La imagen corre como '$user', se esperaba 1000"; exit 1; }
+
+      - name: Verificar que declara healthcheck
+        run: |
+          docker inspect inatrace-mcp-server:ci --format '{{.Config.Healthcheck}}' | grep -q healthcheck \
+            || { echo "La imagen no declara HEALTHCHECK"; exit 1; }
+
+      - name: Arrancar el contenedor
+        run: |
+          docker run -d --name mcp-ci -p 127.0.0.1:8000:8000 \
+            -e KEYCLOAK_AUDIENCE=inatrace-mcp inatrace-mcp-server:ci
+          for i in $(seq 1 20); do
+            curl -sf -m 2 http://127.0.0.1:8000/health/live >/dev/null && break
+            sleep 1
+          done
+
+      - name: Liveness responde con el inventario completo
+        run: |
+          body=$(curl -sf -m 5 http://127.0.0.1:8000/health/live)
+          echo "$body"
+          echo "$body" | grep -q '"tools_count":9' || { echo "Faltan herramientas"; exit 1; }
+
+      - name: Readiness degradado sin base de datos
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8000/health/ready)
+          test "$code" = "503" || { echo "Readiness devolvió $code, se esperaba 503"; exit 1; }
+
+      - name: Rechaza peticiones por encima del límite de tamaño
+        run: |
+          head -c 2097152 /dev/zero | tr '\0' 'x' > /tmp/big.bin
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST \
+            http://127.0.0.1:8000/mcp -H 'Content-Type: application/json' \
+            --data-binary @/tmp/big.bin)
+          test "$code" = "413" || { echo "Cuerpo de 2 MB devolvió $code, se esperaba 413"; exit 1; }
+
+      - name: Rechaza herramientas privilegiadas sin autenticar
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST \
+            http://127.0.0.1:8000/mcp/tools/diagnose_tenant_health \
+            -H 'Content-Type: application/json' -d '{"company_id":1}')
+          test "$code" = "403" || { echo "Llamada anónima devolvió $code, se esperaba 403"; exit 1; }
+
+      - name: Log del contenedor
+        if: always()
+        run: docker logs mcp-ci 2>&1 | tail -30
+
+      - name: Limpieza
+        if: always()
+        run: docker rm -f mcp-ci || true

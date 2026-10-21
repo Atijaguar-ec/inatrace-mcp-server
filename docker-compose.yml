@@ -5,7 +5,15 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
+      # Solo loopback del host: la terminación TLS y la exposición pública
+      # corresponden al proxy inverso del entorno.
       - "127.0.0.1:8085:8000"
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     networks:
       - inatrace-test-network
 

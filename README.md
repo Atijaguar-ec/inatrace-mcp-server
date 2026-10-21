@@ -66,26 +66,59 @@ inatrace-mcp-server/
 
 ## 🧪 Ejecución de Pruebas Automatizadas
 
-```bash
-# Ejecutar suite completa con el runner autónomo:
-python tests/run_tests.py
+La suite **exige las dependencias declaradas en `pyproject.toml`**. Todas tienen un
+fallback por `ImportError` en `src/`, de modo que si faltan no se produce ningún
+fallo: se activan rutas degradadas (sin SDK de MCP, sin driver de PostgreSQL, sin
+topología de Shapely, sin verificación de firmas JWT) y la suite pasaría en verde sin
+ejercitar nada de eso. `run_tests.py` lo comprueba antes de empezar y aborta con
+código 2 enumerando lo que falte.
 
-# O con pytest si está instalado:
-pytest -v tests/
+```bash
+# Crear el entorno del proyecto (una sola vez)
+uv venv && uv pip install -r pyproject.toml --extra dev
 ```
+
+```bash
+# Suite completa con el runner autónomo
+KEYCLOAK_AUDIENCE=inatrace-mcp uv run python tests/run_tests.py
+```
+
+```bash
+# Con informe de cobertura (falla por debajo del umbral de pyproject.toml)
+KEYCLOAK_AUDIENCE=inatrace-mcp uv run coverage run tests/run_tests.py && uv run coverage report
+```
+
+`KEYCLOAK_AUDIENCE` es necesario porque sin audiencia configurada el guard rechaza
+todo token: es el comportamiento correcto en producción, pero haría fallar las
+pruebas de resolución de tier.
+
+Las pruebas usan dobles para el pool de PostgreSQL y no abren ninguna conexión real.
+Para verificar latencia y aislamiento transaccional contra la base de datos de
+staging existe [`tests/verify_staging_live.py`](tests/verify_staging_live.py), que
+aborta si no obtiene el pool de solo lectura.
 
 ---
 
 ## 📦 Despliegue en Docker
 
+> [!IMPORTANT]
+> El servicio **no termina TLS** y debe publicarse únicamente en el loopback del
+> host (`127.0.0.1`), detrás de un proxy inverso que aporte TLS. Publicarlo como
+> `-p 8000:8000` lo expone en todas las interfaces y deja los tokens y los
+> expedientes de trazabilidad en claro.
+>
+> Ten en cuenta además que `inatrace-test-network` es una red externa compartida:
+> cualquier contenedor en ella alcanza el puerto 8000 del contenedor sin pasar por
+> el binding de loopback del host.
+
 ```bash
 # Construir la imagen
 docker build -t inatrace-mcp-server .
 
-# Ejecutar el contenedor en la red de INATrace
+# Ejecutar el contenedor en la red de INATrace (solo loopback del host)
 docker run -d --name inatrace-mcp \
   --network inatrace-network \
-  -p 8000:8000 \
+  -p 127.0.0.1:8085:8000 \
   -e DB_HOST=inatrace-postgres \
   -e DB_PORT=5432 \
   -e DB_NAME=inatrace_unocace_stage \

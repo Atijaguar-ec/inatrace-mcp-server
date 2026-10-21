@@ -27,8 +27,27 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
+    "coverage>=7.4.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["src/healthcheck.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+# Umbral por debajo de la cobertura actual (ver README) para impedir regresiones
+# sin volver frágil la compuerta. Subirlo exige cubrir init_db_pool, que necesita
+# un PostgreSQL real y se verifica con tests/verify_staging_live.py.
+fail_under = 75
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

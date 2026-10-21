@@ -1,0 +1,51 @@
+# Contexto de build mínimo: solo pyproject.toml, uv.lock, src/ y tests/ se copian
+# a la imagen, pero todo lo que esté aquí se envía al daemon de Docker en cada
+# build. Excluir el entorno virtual y el historial de git ahorra cientos de MB.
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Control de versiones
+.git/
+.gitignore
+
+# Bytecode y cachés
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Cobertura
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# Secretos: nunca deben entrar en el contexto de build
+.env
+.env.*
+!.env.example
+
+# Documentación y metadatos que no afectan al runtime
+docs/
+*.md
+!README.md
+
+# IDE y sistema operativo
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Artefactos de empaquetado
+build/
+dist/
+*.egg-info/

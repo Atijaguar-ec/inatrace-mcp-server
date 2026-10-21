@@ -41,4 +41,9 @@ EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 
+# Apunta a /health/ready: sin pool de solo lectura el proceso vive pero no puede
+# responder ninguna consulta regulatoria, y el orquestador debe saberlo.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "-m", "src.healthcheck"]
+
 CMD ["python", "-m", "src.app"]
