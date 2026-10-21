@@ -27,8 +27,10 @@ from src.tools.diagnostic_tools import (
 )
 from src.infrastructure.keycloak_guard import (
     verify_keycloak_token, check_tier_permission, enforce_tier_arguments,
+    enforce_tenant_isolation, tenant_scope_for, jwks_cache,
     AccessTier, AuthContext
 )
+from src.infrastructure.auth_scope import set_tenant_scope, reset_tenant_scope
 
 
 # Structured Logging according to ISO/IEC 27001
@@ -164,9 +166,9 @@ class INATraceFastMCP:
                     return _err(-32601, f"Tool '{tool_name}' not found")
                 # Authorization is unconditional: a missing header resolves to
                 # TIER_1_PUBLIC, it does not skip the check.
-                auth_ctx = authorize_request(auth_header, tool_name)
-                arguments, _ = enforce_tier_arguments(auth_ctx.tier, tool_name, arguments)
-                res = await self.tools[tool_name](**arguments)
+                res = await execute_authorized_tool(
+                    self.tools[tool_name], tool_name, arguments, auth_header
+                )
                 return _ok({
                     "content": [{"type": "text", "text": _json.dumps(res, ensure_ascii=False)}],
                     "structuredContent": res,
@@ -344,10 +346,10 @@ class INATraceFastMCP:
                     try:
                         # Authorization is unconditional: a missing header resolves to
                         # TIER_1_PUBLIC, it does not skip the check.
-                        auth_ctx = authorize_request(auth_header, tool_name)
                         params = _json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
-                        params, _ = enforce_tier_arguments(auth_ctx.tier, tool_name, params)
-                        result = await self.tools[tool_name](**params)
+                        result = await execute_authorized_tool(
+                            self.tools[tool_name], tool_name, params, auth_header
+                        )
                         _send_json(200, "OK", result)
                     except PermissionError as pe:
                         _send_json(403, "Forbidden", {"error": "FORBIDDEN", "message": str(pe)})
@@ -395,12 +397,16 @@ class INATraceFastMCP:
 mcp = INATraceFastMCP(settings.SERVER_NAME)
 
 
-def authorize_request(bearer_token: Optional[str], tool_name: str) -> AuthContext:
+async def authorize_request(bearer_token: Optional[str], tool_name: str) -> AuthContext:
     """
     Enforces ISO/IEC 27001 Multi-Tier Governance and Authorization.
+
+    Async because resolving the tier verifies the token's RS256 signature against the
+    realm's JWKS, which may need to fetch it.
+
     Returns AuthContext or raises PermissionError if access tier is insufficient.
     """
-    auth_ctx = verify_keycloak_token(bearer_token)
+    auth_ctx = await verify_keycloak_token(bearer_token)
     if not check_tier_permission(auth_ctx.tier, tool_name):
         raise PermissionError(
             f"Access denied: Tool '{tool_name}' requires higher privileges than tier '{auth_ctx.tier.value}'."
@@ -408,11 +414,57 @@ def authorize_request(bearer_token: Optional[str], tool_name: str) -> AuthContex
     return auth_ctx
 
 
+async def execute_authorized_tool(
+    tool: Any,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    auth_header: Optional[str]
+) -> Any:
+    """
+    Single authorization path for every transport: resolve the tier, impose the
+    tier's argument policy, check the tenant boundary, then run the tool with the
+    caller's tenant scope installed for database-resolved ownership checks.
+    """
+    auth_ctx = await authorize_request(auth_header, tool_name)
+    effective_args, _ = enforce_tier_arguments(auth_ctx.tier, tool_name, arguments)
+    enforce_tenant_isolation(auth_ctx, tool_name, effective_args)
+
+    scope_token = set_tenant_scope(tenant_scope_for(auth_ctx))
+    try:
+        return await tool(**effective_args)
+    finally:
+        reset_tenant_scope(scope_token)
+
+
 # --- LIFECYCLE HOOKS ---
 @mcp.on_startup
 async def startup():
     logger.info("Initializing INATrace MCP Server...")
     await init_db_pool()
+
+    # Warm the realm's signing keys so the first authenticated request does not pay
+    # the fetch, and make the verification posture explicit in the logs.
+    from src.infrastructure.keycloak_guard import (
+        JOSE_AVAILABLE, accepted_audiences, expected_issuer, jwks_url
+    )
+    if not JOSE_AVAILABLE:
+        logger.error(
+            "python-jose ausente: ningún token podrá verificarse y todas las peticiones "
+            "quedarán en Tier 1. Instale las dependencias declaradas en pyproject.toml."
+        )
+    elif not accepted_audiences():
+        logger.error(
+            "KEYCLOAK_AUDIENCE vacío: ningún token será aceptado. Configúrelo antes de "
+            "habilitar los canales autenticados."
+        )
+    else:
+        logger.info(
+            f"Verificación JWT RS256 activa. Issuer esperado: {expected_issuer()}. "
+            f"Audiencias aceptadas: {accepted_audiences()}."
+        )
+        await jwks_cache.get_key("__warmup__")
+        logger.info(f"JWKS precargado desde {jwks_url()}.")
+
     logger.info("Server startup complete. Ready for tool requests.")
 
 

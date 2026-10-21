@@ -8,6 +8,7 @@ import csv
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from src.infrastructure.db_pool import require_db_pool
+from src.infrastructure.auth_scope import assert_tenant_access
 from src.domain.traces_ld import build_traces_jsonld
 from src.domain.dag_engine import build_lot_dag
 
@@ -57,6 +58,8 @@ async def execute_generate_traces_jsonld(params: GenerateTracesJsonLdInput) -> D
         stock_uuid = so_row["qrcodetag"] or so_row["identifier"] or f"ec00-{params.stock_order_id:06d}-2026-eudr"
         net_weight_kg = float(so_row["totalquantity"] or 0.0)
         company_id = so_row["company_id"]
+        # A DDS for another tenant's lot must not be mintable by passing its id.
+        assert_tenant_access(company_id, f"StockOrder {params.stock_order_id}")
 
         dag_result = await build_lot_dag(conn, str(params.stock_order_id), company_id)
         for p in dag_result.get("participating_plots", []):
@@ -101,6 +104,7 @@ async def execute_export_agrocalidad_guia(params: ExportAgrocalidadInput) -> Dic
 
     rows_data = []
     pool = require_db_pool("export_agrocalidad_guia")
+    assert_tenant_access(params.company_id, f"organización {params.company_id}")
 
     # Any failure of the BI view propagates: an empty or partial regulatory CSV
     # must never be passed off as a complete one.

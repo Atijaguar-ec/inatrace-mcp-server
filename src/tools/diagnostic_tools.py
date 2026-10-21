@@ -8,6 +8,7 @@ import json
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 from src.infrastructure.db_pool import require_db_pool
+from src.infrastructure.auth_scope import assert_tenant_access
 
 
 class DiagnoseTenantHealthInput(BaseModel):
@@ -29,6 +30,7 @@ async def execute_diagnose_tenant_health(params: DiagnoseTenantHealthInput) -> D
     - Config: Multi-tenant configuration coherence.
     """
     pool = require_db_pool("diagnose_tenant_health")
+    assert_tenant_access(params.company_id, f"organización {params.company_id}")
     issues: List[Dict[str, Any]] = []
 
     async with pool.acquire() as conn:
@@ -165,6 +167,9 @@ async def execute_diagnose_and_repair_qr(params: DiagnoseQrInput) -> Dict[str, A
         if row:
             lot_found = True
             company_id = row["company_id"]
+            # Tier 1 is exempt (its answer carries no tenant data); higher tiers
+            # must not diagnose another organization's QR.
+            assert_tenant_access(company_id, f"lote {extracted_id}")
 
         # Check company configuration
         cfg_row = await conn.fetchrow("SELECT configuration FROM company WHERE id = $1", company_id)

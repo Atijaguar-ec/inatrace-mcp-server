@@ -1,11 +1,18 @@
 """
 Shared test fixtures for INATrace MCP Server.
 
-Provides a FakeConnection that answers by inspecting the SQL text instead of by
-call order, so a test only has to override the row sets it actually cares about.
-Needed because the tools no longer fabricate data when the pool is missing: every
-test that exercises a read path must supply a pool.
+Two things live here:
+
+- FakeConnection / FakePool: answer by inspecting the SQL text instead of by call
+  order, so a test only overrides the row sets it cares about. Needed because the
+  tools no longer fabricate data when the pool is missing.
+- TestKeyring: a real RSA keypair plus the matching JWKS entry, so authentication
+  tests sign genuine RS256 tokens and seed the guard's JWKS cache. Signature
+  verification cannot be tested with hand-assembled strings.
 """
+import base64
+import json
+import time
 from typing import Dict, Any, List, Optional
 
 
@@ -185,3 +192,109 @@ class FakePool:
 def build_fake_pool(**kwargs) -> FakePool:
     """Builds a FakePool whose connection uses the supplied row-set overrides."""
     return FakePool(FakeConnection(**kwargs))
+
+
+# --- Authentication fixtures (BLK-01) ---
+
+TEST_ISSUER = "https://auth.unocace.com/realms/unocace"
+TEST_AUDIENCE = "inatrace-mcp"
+
+
+class TestKeyring:
+    """
+    A real RSA keypair that signs tokens and exposes the matching JWKS entry.
+
+    Use `keyring.install()` to seed the guard's JWKS cache, then `keyring.token(...)`
+    to mint a genuinely signed token. `foreign` builds a second keyring whose tokens
+    carry a valid structure but a signature the server cannot verify.
+    """
+
+    def __init__(self, kid: str = "inatrace-test-key"):
+        from jose import jwk
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+
+        self.kid = kid
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.private_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()
+        ).decode()
+        public_pem = key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode()
+
+        raw_jwk = jwk.construct(public_pem, algorithm="RS256").to_dict()
+        self.jwk = {
+            k: (v.decode() if isinstance(v, bytes) else v)
+            for k, v in raw_jwk.items()
+        }
+        self.jwk.update({"kid": kid, "alg": "RS256", "use": "sig"})
+
+    def install(self) -> None:
+        """Seeds the guard's JWKS cache with this keyring's public key."""
+        from src.infrastructure.keycloak_guard import jwks_cache
+        jwks_cache.seed([self.jwk])
+
+    def token(
+        self,
+        roles: Optional[List[str]] = None,
+        sub: str = "test-subject",
+        company_id: Optional[int] = None,
+        audience: Any = TEST_AUDIENCE,
+        issuer: str = TEST_ISSUER,
+        expires_in: int = 3600,
+        azp: Optional[str] = None,
+        token_type: Optional[str] = None,
+        kid: Optional[str] = None,
+        extra_claims: Optional[Dict[str, Any]] = None
+    ) -> str:
+        from jose import jwt
+
+        claims: Dict[str, Any] = {
+            "sub": sub,
+            "iss": issuer,
+            "exp": int(time.time()) + expires_in,
+            "iat": int(time.time()),
+            "realm_access": {"roles": roles or []}
+        }
+        if audience is not None:
+            claims["aud"] = audience
+        if company_id is not None:
+            claims["company_id"] = company_id
+        if azp is not None:
+            claims["azp"] = azp
+        if token_type is not None:
+            claims["token_type"] = token_type
+        if extra_claims:
+            claims.update(extra_claims)
+
+        return jwt.encode(
+            claims,
+            self.private_pem,
+            algorithm="RS256",
+            headers={"kid": kid or self.kid}
+        )
+
+    def bearer(self, **kwargs) -> str:
+        return f"Bearer {self.token(**kwargs)}"
+
+
+def unsigned_token(payload: Dict[str, Any], alg: str = "RS256") -> str:
+    """
+    Hand-assembled token with a bogus signature: the exact shape that escalated to
+    Tier 4 before BLK-01 was closed. Must now be rejected.
+    """
+
+    def b64(obj: Dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    header = b64({"alg": alg, "typ": "JWT", "kid": "inatrace-test-key"})
+    body = b64(payload)
+    # The signature segment has to be well-formed base64url, or the token is
+    # rejected as malformed before the signature is ever checked. A real forgery
+    # looks like a signature; it just is not one.
+    fake_signature = base64.urlsafe_b64encode(b"\x00" * 256).decode().rstrip("=")
+    return f"{header}.{body}.{fake_signature}"

@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from src.infrastructure.spring_client import spring_client
 from src.infrastructure.db_pool import require_db_pool
+from src.infrastructure.auth_scope import assert_tenant_access
 from src.domain.sri_validator import (
     validate_sri_access_key,
     parse_canonical_sri_comment,
@@ -48,6 +49,8 @@ async def execute_ingest_erp_purchase_order(params: IngestErpPurchaseInput) -> D
     3. Builds the canonical reconciliation comment.
     4. Delegates write to Spring Boot Core API (PUT /api/chain/stock-order).
     """
+    assert_tenant_access(params.company_id, f"organización {params.company_id}")
+
     # Step 1: Validate SRI key with Modulo 11
     if not validate_sri_access_key(params.sri_access_key):
         return {
@@ -121,6 +124,8 @@ async def execute_sync_farmer_profile(params: SyncFarmerProfileInput) -> Dict[st
     """
     Synchronizes farmer catalog from ERP to INATrace delegating to Spring Boot.
     """
+    assert_tenant_access(params.company_id, f"organización {params.company_id}")
+
     payload = {
         "companyId": params.company_id,
         "farmerCompanyInternalId": params.farmer_cedula,
@@ -162,10 +167,21 @@ async def execute_verify_sri_compliance(params: VerifySriInput) -> Dict[str, Any
     pool = require_db_pool("verify_sri_compliance")
 
     async with pool.acquire() as conn:
-        comments = await conn.fetchval(
-            "SELECT comments FROM stockorder WHERE id = $1",
+        so_row = await conn.fetchrow(
+            "SELECT comments, company_id FROM stockorder WHERE id = $1",
             params.stock_order_id
         )
+        if not so_row:
+            return {
+                "stock_order_id": params.stock_order_id,
+                "sri_status": "STOCK_ORDER_NOT_FOUND",
+                "message": f"No existe el StockOrder {params.stock_order_id} en la base de datos.",
+                "is_valid": False
+            }
+        # The owning organization is only known now: another tenant's settlement
+        # must not be auditable by passing its id.
+        assert_tenant_access(so_row["company_id"], f"StockOrder {params.stock_order_id}")
+        comments = so_row["comments"]
 
     if not comments:
         return {

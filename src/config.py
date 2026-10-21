@@ -42,5 +42,13 @@ class Settings(BaseSettings):
     SERVICE_ACCOUNT_CLIENT_ID: str = os.getenv("SERVICE_ACCOUNT_CLIENT_ID", "service-account-erp-contable")
     SERVICE_ACCOUNT_CLIENT_SECRET: str = os.getenv("SERVICE_ACCOUNT_CLIENT_SECRET", "")
 
+    # Verificación de firma RS256 contra el JWKS del realm.
+    # KEYCLOAK_AUDIENCE acepta una lista separada por comas; sin valor, ningún
+    # token se considera válido (fallo cerrado, no verificación relajada).
+    KEYCLOAK_AUDIENCE: str = os.getenv("KEYCLOAK_AUDIENCE", "inatrace-mcp")
+    KEYCLOAK_JWKS_TTL_SECONDS: int = int(os.getenv("KEYCLOAK_JWKS_TTL_SECONDS", "600"))
+    KEYCLOAK_JWKS_MIN_REFRESH_SECONDS: int = int(os.getenv("KEYCLOAK_JWKS_MIN_REFRESH_SECONDS", "30"))
+    KEYCLOAK_JWKS_TIMEOUT_SECONDS: float = float(os.getenv("KEYCLOAK_JWKS_TIMEOUT_SECONDS", "5.0"))
+
 
 settings = Settings()

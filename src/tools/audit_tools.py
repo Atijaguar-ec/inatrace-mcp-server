@@ -6,6 +6,7 @@ Audit Tools for INATrace MCP Server:
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from src.infrastructure.db_pool import require_db_pool
+from src.infrastructure.auth_scope import assert_tenant_access
 from src.domain.dag_engine import build_lot_dag
 from src.domain.privacy import apply_privacy_gate
 
@@ -43,6 +44,7 @@ async def execute_audit_lot_traceability(params: AuditLotInput) -> Dict[str, Any
     Executes lot traceability audit through the retrospective DAG engine.
     """
     pool = require_db_pool("audit_lot_traceability")
+    assert_tenant_access(params.company_id, f"organización {params.company_id}")
 
     async with pool.acquire() as conn:
         result = await build_lot_dag(
@@ -84,6 +86,9 @@ async def execute_verify_eudr_compliance(params: VerifyEudrInput) -> Dict[str, A
                 "plots_detail": []
             }
         company_id = so_row["company_id"]
+        # The owning organization is only known now: a stock_order_id from another
+        # tenant must not be auditable by passing its number.
+        assert_tenant_access(company_id, f"StockOrder {params.stock_order_id}")
 
         dag_result = await build_lot_dag(
             conn,
