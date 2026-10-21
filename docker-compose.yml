@@ -6,8 +6,8 @@ services:
     env_file: .env
     ports:
       # Solo loopback del host: la terminación TLS y la exposición pública
-      # corresponden al proxy inverso del entorno.
-      - "127.0.0.1:8085:8000"
+      # corresponden al proxy inverso del entorno (Nginx sirve /mcp).
+      - "127.0.0.1:${MCP_HOST_PORT:-8085}:8000"
     healthcheck:
       test: ["CMD", "python", "-m", "src.healthcheck"]
       interval: 30s
@@ -15,9 +15,14 @@ services:
       start_period: 15s
       retries: 3
     networks:
-      - inatrace-test-network
+      - inatrace
 
 networks:
-  inatrace-test-network:
-    name: inatrace-test-network
+  inatrace:
+    # La red se parametriza porque difiere por entorno: en producción el diseño
+    # (DISENO_ARQUITECTURA_INATRACE_MCP_SERVER_ISO.md) exige `inatrace-network`,
+    # donde vive PostgreSQL 16 detrás de Nginx; en pruebas locales se usa
+    # `inatrace-test-network`. Se espera que exista ya: la crea el entorno, no
+    # este compose.
+    name: ${INATRACE_NETWORK:-inatrace-test-network}
     external: true
