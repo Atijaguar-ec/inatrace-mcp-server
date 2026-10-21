@@ -336,7 +336,7 @@ async def startup():
     else:
         logger.info(
             f"Verificación JWT RS256 activa. Issuer esperado: {expected_issuer()}. "
-            f"Audiencias aceptadas: {accepted_audiences()}."
+            f"JWKS: {jwks_url()}. Audiencias aceptadas: {accepted_audiences()}."
         )
         await jwks_cache.get_key("__warmup__")
         if jwks_cache.key_count:

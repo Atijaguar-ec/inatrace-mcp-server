@@ -19,6 +19,7 @@ from src.infrastructure.keycloak_guard import (
     check_tier_permission,
     accepted_audiences,
     expected_issuer,
+    jwks_url,
     jwks_cache,
     AccessTier
 )
@@ -169,6 +170,52 @@ class TestKeycloakGuard(unittest.IsolatedAsyncioTestCase):
             f"{settings.KEYCLOAK_URL.rstrip('/')}/realms/{settings.KEYCLOAK_REALM}"
         )
         self.assertEqual(accepted_audiences(), [TEST_AUDIENCE])
+
+    # --- 5. ISSUER PÚBLICO vs JWKS INTERNO ---
+    # El despliegue de UNOCACE alcanza Keycloak sólo por la red interna
+    # (http://keycloak:8080/auth) mientras los tokens llevan el issuer público.
+    # Derivar ambos de una sola variable hacía fallar una de las dos comprobaciones.
+
+    def test_explicit_issuer_overrides_the_derived_one(self):
+        with patch.object(settings, "KEYCLOAK_ISSUER", "https://inatrace.test.unocace.com/auth/realms/unocace/"):
+            self.assertEqual(expected_issuer(), "https://inatrace.test.unocace.com/auth/realms/unocace")
+            # La URL del JWKS sigue derivándose por separado.
+            self.assertTrue(jwks_url().endswith("/protocol/openid-connect/certs"))
+            self.assertIn(settings.KEYCLOAK_URL.rstrip('/'), jwks_url())
+
+    def test_explicit_jwks_url_overrides_the_derived_one(self):
+        internal = "http://keycloak:8080/auth/realms/unocace/protocol/openid-connect/certs"
+        with patch.object(settings, "KEYCLOAK_JWKS_URL", internal):
+            self.assertEqual(jwks_url(), internal)
+            # El issuer no se ve afectado.
+            self.assertEqual(
+                expected_issuer(),
+                f"{settings.KEYCLOAK_URL.rstrip('/')}/realms/{settings.KEYCLOAK_REALM}"
+            )
+
+    async def test_public_issuer_accepted_while_jwks_is_internal(self):
+        public_issuer = "https://inatrace.test.unocace.com/auth/realms/unocace"
+        internal_jwks = "http://keycloak:8080/auth/realms/unocace/protocol/openid-connect/certs"
+        with patch.object(settings, "KEYCLOAK_ISSUER", public_issuer), \
+             patch.object(settings, "KEYCLOAK_JWKS_URL", internal_jwks):
+            self.assertEqual(jwks_url(), internal_jwks)
+            token = self.keyring.token(
+                roles=["CUSTOMS_INSPECTOR"], sub="aduana", issuer=public_issuer
+            )
+            ctx = await verify_keycloak_token(token)
+        self.assertEqual(ctx.tier, AccessTier.TIER_2_CUSTOMS)
+        self.assertTrue(ctx.is_authenticated)
+
+    async def test_internal_issuer_in_token_is_still_rejected(self):
+        """Con issuer público configurado, un token que declare el interno no vale."""
+        public_issuer = "https://inatrace.test.unocace.com/auth/realms/unocace"
+        with patch.object(settings, "KEYCLOAK_ISSUER", public_issuer):
+            token = self.keyring.token(
+                roles=["ADMIN"], issuer="http://keycloak:8080/auth/realms/unocace"
+            )
+            ctx = await verify_keycloak_token(token)
+        self.assertEqual(ctx.tier, AccessTier.TIER_1_PUBLIC)
+        self.assertEqual(ctx.rejection_reason, "INVALID_CLAIMS")
 
     # --- 4. TIER RESOLUTION FROM VERIFIED TOKENS ---
 

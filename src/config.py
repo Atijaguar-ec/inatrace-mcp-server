@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # KEYCLOAK_AUDIENCE acepta una lista separada por comas; sin valor, ningún
     # token se considera válido (fallo cerrado, no verificación relajada).
     KEYCLOAK_AUDIENCE: str = os.getenv("KEYCLOAK_AUDIENCE", "inatrace-mcp")
+
+    # El issuer que firma los tokens y la URL desde la que se descarga el JWKS no
+    # siempre coinciden: en un despliegue tras proxy inverso, Keycloak emite `iss`
+    # con su URL pública mientras el servidor sólo lo alcanza por la red interna.
+    # Vacíos, ambos se derivan de KEYCLOAK_URL y el comportamiento es el de antes.
+    KEYCLOAK_ISSUER: str = os.getenv("KEYCLOAK_ISSUER", "")
+    KEYCLOAK_JWKS_URL: str = os.getenv("KEYCLOAK_JWKS_URL", "")
     KEYCLOAK_JWKS_TTL_SECONDS: int = int(os.getenv("KEYCLOAK_JWKS_TTL_SECONDS", "600"))
     KEYCLOAK_JWKS_MIN_REFRESH_SECONDS: int = int(os.getenv("KEYCLOAK_JWKS_MIN_REFRESH_SECONDS", "30"))
     KEYCLOAK_JWKS_TIMEOUT_SECONDS: float = float(os.getenv("KEYCLOAK_JWKS_TIMEOUT_SECONDS", "5.0"))

@@ -119,9 +119,21 @@ class AuthContext(BaseModel):
     rejection_reason: Optional[str] = None
 
 
-def expected_issuer() -> str:
-    """The only issuer accepted: this realm's OIDC issuer URL."""
+def _derived_realm_url() -> str:
     return f"{settings.KEYCLOAK_URL.rstrip('/')}/realms/{settings.KEYCLOAK_REALM}"
+
+
+def expected_issuer() -> str:
+    """
+    The only issuer accepted in the 'iss' claim.
+
+    `KEYCLOAK_ISSUER` overrides the value derived from `KEYCLOAK_URL` because the two
+    differ whenever Keycloak sits behind a reverse proxy: it signs tokens with its
+    public URL while this server reaches it only on the internal network. Deriving
+    both from one variable made either the signature fetch or the issuer check fail.
+    """
+    explicit = (settings.KEYCLOAK_ISSUER or "").strip()
+    return explicit.rstrip('/') if explicit else _derived_realm_url()
 
 
 def accepted_audiences() -> List[str]:
@@ -131,7 +143,15 @@ def accepted_audiences() -> List[str]:
 
 
 def jwks_url() -> str:
-    return f"{expected_issuer()}/protocol/openid-connect/certs"
+    """
+    Where the realm's signing keys are fetched from.
+
+    Deliberately independent of `expected_issuer()`: this may be an internal address
+    unreachable from outside, while the issuer stays the public one that appears in
+    the tokens. `KEYCLOAK_JWKS_URL` is taken verbatim when set.
+    """
+    explicit = (settings.KEYCLOAK_JWKS_URL or "").strip()
+    return explicit if explicit else f"{_derived_realm_url()}/protocol/openid-connect/certs"
 
 
 class JwksCache:
