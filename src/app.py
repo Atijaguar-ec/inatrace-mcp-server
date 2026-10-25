@@ -69,6 +69,40 @@ class INATraceFastMCP:
         self._asgi_app = None
         self._sdk = _SDKFastMCP(name) if _SDKFastMCP is not None else None
 
+    def _generate_tool_schema(self, fn) -> Dict[str, Any]:
+        import inspect
+        from typing import Union, get_origin, get_args
+
+        sig = inspect.signature(fn)
+        properties = {}
+        required = []
+        type_map = {
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+            dict: "object",
+            list: "array",
+        }
+        for name, param in sig.parameters.items():
+            annotation = param.annotation
+            if get_origin(annotation) is Union:
+                args = [a for a in get_args(annotation) if a is not type(None)]
+                if args:
+                    annotation = args[0]
+            json_type = type_map.get(annotation, "string")
+            prop = {"type": json_type}
+            if param.default is inspect.Parameter.empty:
+                required.append(name)
+            elif param.default is not None:
+                prop["default"] = param.default
+            properties[name] = prop
+
+        schema = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
     def tool(self):
         def decorator(fn):
             self.tools[fn.__name__] = fn
@@ -157,7 +191,11 @@ class INATraceFastMCP:
             elif method == "tools/list":
                 return _ok({
                     "tools": [
-                        {"name": k, "description": (fn.__doc__ or "").strip()}
+                        {
+                            "name": k,
+                            "description": (fn.__doc__ or "").strip(),
+                            "inputSchema": self._generate_tool_schema(fn)
+                        }
                         for k, fn in self.tools.items()
                     ]
                 })
