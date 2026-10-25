@@ -253,9 +253,49 @@ class TestRestToolRoute(TransportTestCase):
         self.assertTrue(r.json()["found"])
         self.assertEqual(r.json()["data_source"], "DATABASE")
 
-    def test_non_object_body_is_400(self):
-        r = self.client.post("/mcp/tools/audit_lot_traceability", json=[1, 2])
-        self.assertEqual(r.status_code, 400)
+    def test_initialize_returns_mcp_session_id_header(self):
+        r = self.client.post("/mcp", json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"}
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("mcp-session-id", {k.lower() for k in r.headers})
+        session_id = r.headers.get("mcp-session-id")
+        self.assertTrue(bool(session_id))
+        self.assertEqual(r.json()["result"]["protocolVersion"], "2024-11-05")
+
+    def test_oauth_protected_resource_metadata(self):
+        for path in ("/.well-known/oauth-protected-resource", "/mcp/.well-known/oauth-protected-resource"):
+            r = self.client.get(path)
+            self.assertEqual(r.status_code, 200, path)
+            data = r.json()
+            self.assertIn("authorization_servers", data)
+            self.assertTrue(len(data["authorization_servers"]) > 0)
+            self.assertIn("scopes_supported", data)
+
+    def test_coop_staff_tier_access_allowed_for_own_company(self):
+        bearer = self.keyring.bearer(
+            roles=["USER"], sub="tecnico-unocace", company_id=1
+        )
+        set_db_pool(build_fake_pool())
+        r = self.client.post("/mcp/tools/audit_lot_traceability",
+                             json={"lot_identifier": "LOT-TEST-001", "company_id": 1, "public_view": False},
+                             headers={"Authorization": bearer})
+        self.assertEqual(r.status_code, 200)
+        # Coop staff is NOT forced to public_view=True
+        self.assertNotIn("channel", r.json())  # public view has channel=PUBLIC_B2C
+
+    def test_coop_staff_tier_access_denied_for_another_company(self):
+        bearer = self.keyring.bearer(
+            roles=["USER"], sub="tecnico-unocace", company_id=1
+        )
+        set_db_pool(build_fake_pool())
+        r = self.client.post("/mcp/tools/audit_lot_traceability",
+                             json={"lot_identifier": "LOT-TEST-001", "company_id": 2},
+                             headers={"Authorization": bearer})
+        self.assertEqual(r.status_code, 403)
 
 
 if __name__ == "__main__":

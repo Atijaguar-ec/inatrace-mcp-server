@@ -20,6 +20,8 @@ Every tool invocation goes through `execute_authorized_tool`, so authorization, 
 tier argument policy and the tenant boundary apply on both transports.
 """
 import json
+import time
+import uuid
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -130,6 +132,42 @@ class BodySizeLimitMiddleware:
         await send({"type": "http.response.body", "body": payload})
 
 
+class MCPSession:
+    def __init__(self, session_id: str, auth_header: Optional[str] = None):
+        self.session_id = session_id
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self.auth_header = auth_header
+        self.created_at: float = time.time()
+        self.last_active: float = time.time()
+
+
+class MCPSessionManager:
+    def __init__(self):
+        self._sessions: Dict[str, MCPSession] = {}
+        self._lock = asyncio.Lock()
+
+    async def create_session(self, auth_header: Optional[str] = None) -> MCPSession:
+        async with self._lock:
+            session_id = uuid.uuid4().hex
+            session = MCPSession(session_id, auth_header)
+            self._sessions[session_id] = session
+            return session
+
+    async def get_session(self, session_id: str) -> Optional[MCPSession]:
+        async with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess:
+                sess.last_active = time.time()
+            return sess
+
+    async def remove_session(self, session_id: str):
+        async with self._lock:
+            self._sessions.pop(session_id, None)
+
+
+session_manager = MCPSessionManager()
+
+
 def build_app(mcp) -> Starlette:
     """Builds the ASGI application for an INATraceFastMCP instance."""
     from src.app import execute_authorized_tool
@@ -186,37 +224,102 @@ def build_app(mcp) -> Starlette:
 
     async def sse_endpoint(request: Request) -> Response:
         """
-        Announces the MCP endpoint to an AI-capable client.
-
-        This is discovery, not the dossier: the agent reads the announcement and then
-        calls tools/call on /mcp with a valid token. Emitted as a real event stream;
-        the previous implementation declared a Content-Length on a text/event-stream
-        response, which is malformed.
+        Announces the MCP endpoint to an AI-capable client and provides SSE transport.
+        Returns the endpoint discovery payload with sessionId, and supports persistent
+        event streaming when stream=true.
         """
         lot_id = request.query_params.get("lotId", "unknown")
+        session_id = request.headers.get("mcp-session-id") or uuid.uuid4().hex
+        prefix = "/mcp" if request.url.path.startswith("/mcp") else ""
+
         payload = json.dumps({
             "protocol": "mcp/2024-11-05",
             "server": mcp.name,
             "lotId": lot_id,
+            "sessionId": session_id,
             "jsonrpcEndpoint": "/mcp",
+            "messageEndpoint": f"{prefix}/message?sessionId={session_id}",
             "availableTools": list(mcp.tools.keys()),
             "availableResources": list(mcp.resources.keys()),
             "availablePrompts": list(mcp.prompts.keys())
         })
 
+        is_stream = request.query_params.get("stream") == "true"
+
         async def event_stream():
             yield f"event: endpoint\ndata: {payload}\n\n".encode("utf-8")
+            if is_stream:
+                session = await session_manager.create_session(auth_header=request.headers.get("authorization"))
+                try:
+                    while True:
+                        try:
+                            msg = await asyncio.wait_for(session.queue.get(), timeout=15.0)
+                            yield f"event: message\ndata: {msg}\n\n".encode("utf-8")
+                        except asyncio.TimeoutError:
+                            yield f": keepalive\n\n".encode("utf-8")
+                except (asyncio.CancelledError, GeneratorExit):
+                    pass
+                finally:
+                    await session_manager.remove_session(session.session_id)
 
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
-                "Link": f'</mcp/sse?lotId={lot_id}>; rel="modelcontextprotocol"'
+                "Mcp-Session-Id": session_id,
+                "Link": f'<{prefix}/sse?lotId={lot_id}>; rel="modelcontextprotocol"'
             }
         )
 
+    async def post_message(request: Request) -> Response:
+        """
+        Handles incoming JSON-RPC 2.0 messages for an active MCP SSE session.
+        Enqueues the response back to the client's SSE event stream.
+        """
+        session_id = request.query_params.get("sessionId") or request.headers.get("mcp-session-id")
+        if not session_id:
+            return _json(
+                {"error": "MISSING_SESSION_ID", "message": "Parámetro 'sessionId' o cabecera 'Mcp-Session-Id' requerida."},
+                status_code=400
+            )
+
+        session = await session_manager.get_session(session_id)
+        if not session:
+            return _json(
+                {"error": "SESSION_NOT_FOUND", "message": f"Sesión '{session_id}' no encontrada o expirada."},
+                status_code=404
+            )
+
+        try:
+            body = await request.body()
+            rpc_req = json.loads(body or b"{}")
+        except json.JSONDecodeError as exc:
+            return _json({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"}
+            }, status_code=400)
+
+        if not isinstance(rpc_req, dict):
+            return _json({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request: se esperaba un objeto JSON"}
+            }, status_code=400)
+
+        auth_header = request.headers.get("authorization") or session.auth_header
+        rpc_resp = await mcp.handle_jsonrpc_request(rpc_req, auth_header=auth_header)
+
+        try:
+            session.queue.put_nowait(json.dumps(rpc_resp))
+        except asyncio.QueueFull:
+            return _json({"error": "QUEUE_FULL", "message": "Cola de mensajes llena para esta sesión."}, status_code=503)
+
+        return Response(content="Accepted", status_code=202, media_type="text/plain", headers={"Mcp-Session-Id": session_id})
+
     async def jsonrpc(request: Request) -> Response:
+        session_id = request.headers.get("mcp-session-id") or request.query_params.get("sessionId")
         try:
             rpc_req = json.loads(await request.body() or b"{}")
         except json.JSONDecodeError as exc:
@@ -232,8 +335,26 @@ def build_app(mcp) -> Starlette:
                 "error": {"code": -32600, "message": "Invalid Request: se esperaba un objeto JSON"}
             })
 
+        if not session_id and rpc_req.get("method") == "initialize":
+            session_id = uuid.uuid4().hex
+
         auth_header = request.headers.get("authorization")
-        return _json(await mcp.handle_jsonrpc_request(rpc_req, auth_header=auth_header))
+        resp = await mcp.handle_jsonrpc_request(rpc_req, auth_header=auth_header)
+        headers = {"Mcp-Session-Id": session_id} if session_id else {}
+        return _json(resp, headers=headers)
+
+    async def oauth_protected_resource(request: Request) -> Response:
+        """
+        RFC 8414 / RFC 9207 OAuth 2.0 Protected Resource Metadata.
+        """
+        realm_issuer = f"{settings.KEYCLOAK_URL}/realms/{settings.KEYCLOAK_REALM}"
+        return _json({
+            "resource": str(request.base_url).rstrip("/"),
+            "authorization_servers": [realm_issuer],
+            "scopes_supported": ["openid", "profile", "email"],
+            "bearer_methods_supported": ["header"],
+            "resource_documentation": "https://github.com/atijaguar-ec/inatrace-mcp-server"
+        })
 
     async def call_tool(request: Request) -> Response:
         tool_name = request.path_params["tool_name"]
@@ -290,8 +411,13 @@ def build_app(mcp) -> Starlette:
         Route("/mcp/prompts", list_prompts, methods=["GET"]),
         Route("/prompts", list_prompts, methods=["GET"]),
         Route("/mcp/sse", sse_endpoint, methods=["GET"]),
+        Route("/sse", sse_endpoint, methods=["GET"]),
+        Route("/mcp/message", post_message, methods=["POST"]),
+        Route("/message", post_message, methods=["POST"]),
         Route("/mcp", jsonrpc, methods=["POST"]),
         Route("/jsonrpc", jsonrpc, methods=["POST"]),
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
+        Route("/mcp/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
         Route("/mcp/tools/{tool_name}", call_tool, methods=["POST"]),
         Route("/tools/{tool_name}", call_tool, methods=["POST"]),
     ]

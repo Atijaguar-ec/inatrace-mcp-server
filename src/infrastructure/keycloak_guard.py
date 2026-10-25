@@ -47,6 +47,7 @@ ALLOWED_ALGORITHMS = ["RS256"]
 class AccessTier(str, Enum):
     TIER_1_PUBLIC = "TIER_1_PUBLIC"       # Public B2C / Consumers / Anonymous QR
     TIER_2_CUSTOMS = "TIER_2_CUSTOMS"     # European Customs / TRACES-NT Auditors
+    TIER_2B_COOP_STAFF = "TIER_2B_COOP_STAFF" # UNOCACE Field Technicians / Cooperative Internal Staff
     TIER_3_ERP = "TIER_3_ERP"             # Accounting ERP / Báscula (service-account-erp-contable)
     TIER_4_SUPPORT = "TIER_4_SUPPORT"     # GIZ 60h Support / Engineering Diagnostics
 
@@ -61,6 +62,13 @@ TIER_PERMITTED_TOOLS: Dict[AccessTier, List[str]] = {
         "audit_lot_traceability",
         "verify_eudr_compliance",
         "generate_traces_jsonld",
+        "export_agrocalidad_guia",
+        "verify_sri_compliance",
+        "diagnose_and_repair_qr"
+    ],
+    AccessTier.TIER_2B_COOP_STAFF: [
+        "audit_lot_traceability",
+        "verify_eudr_compliance",
         "export_agrocalidad_guia",
         "verify_sri_compliance",
         "diagnose_and_repair_qr"
@@ -103,8 +111,8 @@ TIERS_EXEMPT_FROM_TENANT_CHECK = frozenset({
     AccessTier.TIER_1_PUBLIC
 })
 
-# The ERP/scale write path must carry its organization in the token.
-TIERS_REQUIRING_TENANT_CLAIM = frozenset({AccessTier.TIER_3_ERP})
+# The ERP/scale write path and Cooperative staff path must carry their organization in the token.
+TIERS_REQUIRING_TENANT_CLAIM = frozenset({AccessTier.TIER_3_ERP, AccessTier.TIER_2B_COOP_STAFF})
 
 TENANT_ARGUMENT = "company_id"
 
@@ -287,6 +295,11 @@ def resolve_tier_from_claims(claims: Dict[str, Any]) -> AuthContext:
     if any(r in all_roles for r in ("CUSTOMS_INSPECTOR", "TRACES_AUDITOR", "customs-officer")) \
             or claims.get("token_type") == "customs_passport":
         return ctx(AccessTier.TIER_2_CUSTOMS)
+
+    # Tier 2B: Cooperative Internal Staff / Field Technician
+    if any(r in all_roles for r in ("FIELD_TECHNICIAN", "COOP_STAFF", "cooperative-technician", "TECNICO_CAMPO")) \
+            or (company_id is not None and any(r in all_roles for r in ("USER", "coop-user"))):
+        return ctx(AccessTier.TIER_2B_COOP_STAFF)
 
     # Authenticated consumer / producer: public tier, but identified.
     return ctx(AccessTier.TIER_1_PUBLIC)

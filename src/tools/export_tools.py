@@ -111,13 +111,25 @@ async def execute_export_agrocalidad_guia(params: ExportAgrocalidadInput) -> Dic
     async with pool.acquire() as conn:
         db_rows = await conn.fetch("""
             SELECT
-                ruc_operador, codigo_sitio_guia, codigo_area_guia, fecha_recepcion,
-                codigo_dpa_inec, provincia, canton, parroquia, nombre_productor,
-                tipo_producto, peso_bruto_kg, tara_kg, peso_neto_kg, numero_sacos,
-                destino_movilizacion, estado_fitosanitario
+                COALESCE(numero_ruc_operador, '') AS ruc_operador,
+                COALESCE(codigo_sitio_origen_guia, '') AS codigo_sitio_guia,
+                COALESCE(codigo_area_origen_guia, '') AS codigo_area_guia,
+                fecha_acopio_entrega AS fecha_recepcion,
+                COALESCE(codigo_dpa_inec, '000000') AS codigo_dpa_inec,
+                COALESCE(provincia_predio, '') AS provincia,
+                COALESCE(canton_predio, '') AS canton,
+                COALESCE(parroquia_predio, '') AS parroquia,
+                COALESCE(nombre_productor, '') AS nombre_productor,
+                COALESCE(descripcion_producto, 'Cacao') AS tipo_producto,
+                COALESCE(peso_neto_oficial_kg, 0.0) AS peso_bruto_kg,
+                0.0 AS tara_kg,
+                COALESCE(peso_neto_oficial_kg, 0.0) AS peso_neto_kg,
+                1 AS numero_sacos,
+                COALESCE(centro_acopio_destino, '') AS destino_movilizacion,
+                COALESCE(estado_calidad_regulatoria, 'OK') AS estado_fitosanitario
             FROM bi.rpt_cacao_agrocalidad_guia
-            WHERE company_id = $1 AND fecha_recepcion BETWEEN $2::date AND $3::date
-            ORDER BY fecha_recepcion ASC
+            WHERE organization_id = $1 AND fecha_acopio_entrega BETWEEN $2::date AND $3::date
+            ORDER BY fecha_acopio_entrega ASC
         """, params.company_id, params.date_from, params.date_to)
         for r in db_rows:
             rows_data.append([str(r[h.lower()] or "") for h in headers])
