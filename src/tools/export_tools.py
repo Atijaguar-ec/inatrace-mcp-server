@@ -106,6 +106,14 @@ async def execute_export_agrocalidad_guia(params: ExportAgrocalidadInput) -> Dic
     pool = require_db_pool("export_agrocalidad_guia")
     assert_tenant_access(params.company_id, f"organización {params.company_id}")
 
+    from datetime import date as dt_date
+    try:
+        d_from = dt_date.fromisoformat(str(params.date_from).strip())
+        d_to = dt_date.fromisoformat(str(params.date_to).strip())
+    except (ValueError, TypeError):
+        d_from = params.date_from
+        d_to = params.date_to
+
     # Any failure of the BI view propagates: an empty or partial regulatory CSV
     # must never be passed off as a complete one.
     async with pool.acquire() as conn:
@@ -128,9 +136,9 @@ async def execute_export_agrocalidad_guia(params: ExportAgrocalidadInput) -> Dic
                 COALESCE(centro_acopio_destino, '') AS destino_movilizacion,
                 COALESCE(estado_calidad_regulatoria, 'OK') AS estado_fitosanitario
             FROM bi.rpt_cacao_agrocalidad_guia
-            WHERE organization_id = $1 AND fecha_acopio_entrega BETWEEN $2::date AND $3::date
+            WHERE organization_id = $1 AND fecha_acopio_entrega BETWEEN $2 AND $3
             ORDER BY fecha_acopio_entrega ASC
-        """, params.company_id, params.date_from, params.date_to)
+        """, params.company_id, d_from, d_to)
         for r in db_rows:
             rows_data.append([str(r[h.lower()] or "") for h in headers])
 
