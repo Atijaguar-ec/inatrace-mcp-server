@@ -267,6 +267,8 @@ class INATraceFastMCP:
             timeout_keep_alive=settings.KEEP_ALIVE_TIMEOUT_SECONDS,
             h11_max_incomplete_event_size=settings.MAX_REQUEST_BYTES,
             access_log=bool(settings.DEBUG),
+            proxy_headers=True,
+            forwarded_allow_ips="*",
         )
 
 

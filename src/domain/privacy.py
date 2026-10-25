@@ -66,3 +66,16 @@ def apply_privacy_gate(raw_lot_data: Dict[str, Any], is_public_channel: bool = T
         return sanitize_for_public_b2c(raw_lot_data)
     # Regulatory channel (Tier 2 Customs / Auditor): returns full technical dossier
     return raw_lot_data
+
+
+def redact_settlement_data(raw_lot_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Redacts fiscal settlements (SRI settlement data, access keys, internal ERP IDs)
+    for cooperative field staff (Tier 2B), preserving operational PII (farmer names,
+    plots, coordinates, mass balance, EUDR summary).
+    """
+    out = dict(raw_lot_data)
+    out.pop("sri_settlements", None)
+    out["settlement_data_redacted"] = True
+    return out
+

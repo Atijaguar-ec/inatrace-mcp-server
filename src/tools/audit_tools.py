@@ -6,9 +6,9 @@ Audit Tools for INATrace MCP Server:
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from src.infrastructure.db_pool import require_db_pool
-from src.infrastructure.auth_scope import assert_tenant_access
+from src.infrastructure.auth_scope import assert_tenant_access, current_tenant_scope
 from src.domain.dag_engine import build_lot_dag
-from src.domain.privacy import apply_privacy_gate
+from src.domain.privacy import apply_privacy_gate, redact_settlement_data
 
 
 class AuditLotInput(BaseModel):
@@ -59,6 +59,9 @@ async def execute_audit_lot_traceability(params: AuditLotInput) -> Dict[str, Any
 
     if params.public_view:
         return apply_privacy_gate(result, is_public_channel=True)
+    scope = current_tenant_scope()
+    if scope and scope.redact_settlements:
+        return redact_settlement_data(result)
     return result
 
 

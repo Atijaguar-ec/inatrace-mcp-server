@@ -449,7 +449,8 @@ def tenant_scope_for(auth_ctx: AuthContext) -> TenantScope:
         tier=auth_ctx.tier.value,
         user_id=auth_ctx.user_id,
         company_id=auth_ctx.company_id,
-        cross_tenant_allowed=auth_ctx.tier in TIERS_EXEMPT_FROM_TENANT_CHECK
+        cross_tenant_allowed=auth_ctx.tier in TIERS_EXEMPT_FROM_TENANT_CHECK,
+        redact_settlements=auth_ctx.tier == AccessTier.TIER_2B_COOP_STAFF
     )
 
 

@@ -26,6 +26,7 @@ class TenantScope:
     user_id: str
     company_id: Optional[int] = None
     cross_tenant_allowed: bool = False
+    redact_settlements: bool = False
 
 
 _scope: ContextVar[Optional[TenantScope]] = ContextVar("inatrace_tenant_scope", default=None)
