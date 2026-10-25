@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Servidor y Transporte
-    SERVER_NAME: str = os.getenv("SERVER_NAME", "inatrace-oracle")
+    SERVER_NAME: str = os.getenv("SERVER_NAME", "inatrace-mcp")
     PORT: int = int(os.getenv("PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
