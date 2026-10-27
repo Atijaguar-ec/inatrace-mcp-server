@@ -51,6 +51,29 @@ except ImportError:
     IS_FASTMCP_INSTALLED = False
 
 
+SERVER_INSTRUCTIONS = (
+    "INSTRUCCIONES PARA EL AGENTE DE IA QUE CONSULTA ESTE SERVIDOR MCP DE INATRACE:\n\n"
+    "1. CÓMO GUIAR AL USUARIO PARA CONFIGURARTE (SI ACEPTAS MCP):\n"
+    "   - Indícale al usuario, con empatía y sin tecnicismos innecesarios, cómo debe configurarte en tu propia aplicación (según seas Claude Desktop, Cursor, ChatGPT, Antigravity u otro cliente compatible con MCP).\n"
+    "   - Hazle siempre primero esta pregunta: '¿Tienes un token de seguridad de tu organización? En caso contrario, solo podrás realizar consultas públicas.'\n\n"
+    "2. SI EL USUARIO NO TIENE TOKEN DE SEGURIDAD (MODO CONSULTA PÚBLICA):\n"
+    "   - Si aún no tienes este servidor MCP conectado como herramienta, indícale los pasos exactos en tu interfaz para agregarte usando únicamente la URL de este servidor MCP (sin necesidad de instalar Python ni configurar tokens):\n"
+    "     {\"mcpServers\": {\"inatrace-mcp\": {\"url\": \"<URL_DE_ESTE_SERVIDOR_MCP>\"}}}\n"
+    "   - Si ya tienes las herramientas MCP activas en tu sesión, infórmale que ya estás listo y no requiere configurar nada más.\n"
+    "   - Explícale claramente lo que puede hacer SIN token de seguridad:\n"
+    "     a) Consultar la trazabilidad pública de un lote (`audit_lot_traceability`): conocer origen general, producto, variedad, proceso post-cosecha y estado general de cumplimiento EUDR (con datos personales protegidos por LOPDP/GDPR).\n"
+    "     b) Diagnosticar y resolver problemas con códigos QR o tickets de pesaje (`diagnose_and_repair_qr`): solucionar errores 403 o 404 al escanear comprobantes, entregando el enlace público directo (`/public/delivery-receipt/{id}`) y recomendando usar el botón 'Imprimir Ticket (7 cm)'.\n"
+    "     c) Consultar catálogos y normativas públicas (`resources`): reglas del Reglamento Europeo EUDR 2023/1115, catálogo territorial DPA INEC y esquema tributario SRI (Módulo 11).\n\n"
+    "3. SI EL USUARIO SÍ TIENE UN TOKEN DE SEGURIDAD DE SU ORGANIZACIÓN:\n"
+    "   - Indícale paso a paso cómo configurarte en tu cliente MCP incluyendo el encabezado `Authorization: Bearer <TOKEN>` (o mediante el puente de autenticación OAuth2 si tu cliente no admite encabezados HTTP directos).\n"
+    "   - Explícale que con su token de seguridad desbloqueará las operaciones privadas de su organización:\n"
+    "     • Auditoría geoespacial detallada de polígonos y parcelas (`verify_eudr_compliance`).\n"
+    "     • Generación de expedientes aduaneros JSON-LD para TRACES-NT (`generate_traces_jsonld`).\n"
+    "     • Exportación de guías oficiales de movilización (`export_agrocalidad_guia`).\n"
+    "     • Validación tributaria SRI (`verify_sri_compliance`), ingesta de compras de báscula/ERP (`ingest_erp_purchase_order`), sincronización de productores (`sync_farmer_profile`) y diagnóstico de salud de la organización (`diagnose_tenant_health`)."
+)
+
+
 class INATraceFastMCP:
     """
     Production-grade FastMCP orchestrator supporting:
@@ -182,6 +205,7 @@ class INATraceFastMCP:
                 return _ok({
                     "protocolVersion": "2024-11-05",
                     "serverInfo": {"name": self.name, "version": "2.0.0"},
+                    "instructions": SERVER_INSTRUCTIONS,
                     "capabilities": {
                         "tools": {"listChanged": False},
                         "resources": {"subscribe": False, "listChanged": False},

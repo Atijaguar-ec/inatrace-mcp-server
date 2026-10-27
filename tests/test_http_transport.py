@@ -159,7 +159,30 @@ class TestJsonRpcOverHttp(TransportTestCase):
     def test_initialize(self):
         r = self.client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(r.status_code, 200)
-        self.assertIn("capabilities", r.json()["result"])
+        res = r.json()["result"]
+        self.assertIn("capabilities", res)
+        self.assertIn("instructions", res)
+        self.assertIn("organización", res["instructions"])
+        self.assertIn("token de seguridad", res["instructions"])
+        self.assertNotIn("UNOCACE", res["instructions"])
+        self.assertNotIn("cooperativa", res["instructions"].lower())
+
+    def test_mcp_overview_get_returns_agent_instructions(self):
+        for path in ("/mcp", "/"):
+            r = self.client.get(
+                path,
+                headers={"x-forwarded-proto": "https", "x-forwarded-host": "mcp.example.org"}
+            )
+            self.assertEqual(r.status_code, 200, path)
+            body = r.json()
+            self.assertEqual(body["status"], "ALIVE")
+            self.assertEqual(body["mcp_endpoint"], "https://mcp.example.org/mcp")
+            self.assertIn("instructions_for_ai_agent", body)
+            self.assertIn("https://mcp.example.org/mcp", body["instructions_for_ai_agent"])
+            self.assertIn("organización", body["question_to_ask_user"])
+            self.assertNotIn("UNOCACE", body["instructions_for_ai_agent"])
+            self.assertNotIn("cooperativa", body["instructions_for_ai_agent"].lower())
+            self.assertEqual(len(body["capabilities_without_token"]), 3)
 
     def test_jsonrpc_alias_path(self):
         r = self.client.post("/jsonrpc", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

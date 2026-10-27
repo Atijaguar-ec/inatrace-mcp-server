@@ -288,6 +288,58 @@ def build_app(mcp) -> Starlette:
             logger.error(f"Error ejecutando '{tool_name}': {exc}")
             return _json({"error": "EXECUTION_ERROR", "message": str(exc)}, status_code=400)
 
+    async def mcp_overview(request: Request) -> Response:
+        """Overview and onboarding endpoint for HTTP GET on /mcp or /."""
+        from src.app import SERVER_INSTRUCTIONS
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+        mcp_url = f"{proto}://{host}".rstrip("/") + "/mcp"
+        return _json({
+            "server": mcp.name,
+            "version": "2.0.0",
+            "status": "ALIVE",
+            "mcp_endpoint": mcp_url,
+            "protocol": "Model Context Protocol (JSON-RPC 2.0)",
+            "instructions_for_ai_agent": SERVER_INSTRUCTIONS.replace("<URL_DE_ESTE_SERVIDOR_MCP>", mcp_url),
+            "question_to_ask_user": (
+                "¿Tienes un token de seguridad de tu organización? "
+                "En caso contrario, solo podrás realizar consultas públicas."
+            ),
+            "client_configuration_examples": {
+                "public_mode_without_token": {
+                    "mcpServers": {
+                        "inatrace-mcp": {
+                            "url": mcp_url
+                        }
+                    }
+                },
+                "authenticated_mode_with_token": {
+                    "mcpServers": {
+                        "inatrace-mcp": {
+                            "url": mcp_url,
+                            "headers": {
+                                "Authorization": "Bearer <TOKEN_DE_SEGURIDAD>"
+                            }
+                        }
+                    }
+                }
+            },
+            "capabilities_without_token": [
+                "Consultar trazabilidad pública de un lote (audit_lot_traceability con datos personales protegidos por LOPDP/GDPR).",
+                "Diagnosticar y resolver problemas con códigos QR o tickets de pesaje como errores 403 o 404 (diagnose_and_repair_qr).",
+                "Consultar catálogos y normativas públicas (reglas EUDR 2023/1115, catálogo territorial DPA INEC y esquema SRI Módulo 11)."
+            ],
+            "capabilities_with_security_token": (
+                "Con un token de seguridad de la organización (Authorization: Bearer <token>) se habilitan las herramientas "
+                "avanzadas según el rol: auditoría geoespacial detallada EUDR, generación de JSON-LD para TRACES-NT, "
+                "exportación de guías de Agrocalidad, verificación tributaria SRI, ingesta de compras de báscula/ERP, "
+                "sincronización de productores y diagnóstico de salud de la organización."
+            ),
+            "tools_count": len(mcp.tools),
+            "resources_count": len(mcp.resources),
+            "prompts_count": len(mcp.prompts)
+        })
+
     async def not_found(request: Request, exc: Exception) -> Response:
         return _json({"error": "NOT_FOUND", "path": request.url.path}, status_code=404)
 
@@ -305,6 +357,8 @@ def build_app(mcp) -> Starlette:
         Route("/sse", sse_endpoint, methods=["GET"]),
         Route("/mcp/message", post_message, methods=["POST"]),
         Route("/message", post_message, methods=["POST"]),
+        Route("/mcp", mcp_overview, methods=["GET"]),
+        Route("/", mcp_overview, methods=["GET"]),
         Route("/mcp", jsonrpc, methods=["POST"]),
         Route("/jsonrpc", jsonrpc, methods=["POST"]),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
